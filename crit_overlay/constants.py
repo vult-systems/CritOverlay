@@ -114,6 +114,21 @@ TOOLBAR_STYLE = f"""
     QFrame#Sep {{
         background: rgba(255,255,255,16);
     }}
+    /* Disabled controls (e.g. margin settings before an area is selected)
+       must look inactive; the accent colors above read as "live" (#13). */
+    QToolButton:checked:disabled {{
+        background: transparent;
+        border: 1px solid rgba(255,255,255,30);
+    }}
+    QSlider::sub-page:horizontal:disabled {{
+        background: rgba(255,255,255,40);
+    }}
+    QSlider::handle:horizontal:disabled {{
+        background: #5c5c62;
+    }}
+    QLabel#SliderCaption:disabled, QLabel#SliderValue:disabled {{
+        color: #55555b;
+    }}
 """
 
 TOAST_STYLE = """
