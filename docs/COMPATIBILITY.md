@@ -7,7 +7,7 @@ from the code, but nobody has run it. Move a row from Assumed to Tested only
 after running the [manual checklist](#manual-validation-required-before-release)
 there.
 
-Last updated for **v1.5.0-rc.2**: PySide6 / Qt 6.8.3, PyInstaller 6.22.3,
+Last updated for **v1.5.0-rc.3**: PySide6 / Qt 6.8.3, PyInstaller 6.22.3,
 bundled Python **3.13.17**.
 
 ## Supported platform
@@ -92,7 +92,7 @@ exercises the toolbar and pass-through (see `crit_overlay/selftest.py`).
 
 ## Manual validation required before release
 
-The automated checks can't cover these. None are done for v1.5.0-rc.2
+The automated checks can't cover these. None are done for v1.5.0-rc.3
 (tracked in #4). Each needs
 a person at the machine, and they're the release gate. Record the machine
 (Windows build, GPU, monitors with scale, pen model) next to each result.
@@ -134,8 +134,9 @@ a person at the machine, and they're the release gate. Record the machine
 **Drawing region** (#10)
 14. With the pen, press R and drag a region over an image on each monitor
     (including a scaled one), then draw inside, across the edge, and in the
-    margin. Strokes stop at the margin's outer edge and can't start
-    outside. F9 saves only region plus margin, with no desktop in the
+    margin. Changing the margin's thickness, color or opacity turns it on
+    and updates it while dragging (#13). Strokes stop at the margin's
+    outer edge and can't start outside. F9 saves only region plus margin, with no desktop in the
     margin. Esc during a selection cancels it without closing the app.
 
 ## Automated release check

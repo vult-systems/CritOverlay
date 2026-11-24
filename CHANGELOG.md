@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## v1.5.0-rc.3 (pre-release)
+
+Third release candidate for v1.5.0: fixes the annotation margin from rc.2.
+Everything listed under rc.2 and rc.1 also applies. v1.4.2 stays the stable
+release until the acceptance checks in #4 pass.
 
 **Fixed**
 
