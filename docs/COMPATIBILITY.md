@@ -51,6 +51,7 @@ exercises the toolbar and pass-through (see `crit_overlay/selftest.py`).
 | Alignment repair | Window forced off its monitor with a native `SetWindowPos` | Pass: detected and put back by the one-time re-apply |
 | Toolbar | Brush/Eraser buttons, size slider vs `[`/`]` keys, Undo/Redo/Clear enable states, clicking the toolbar doesn't draw, monitor button hidden with one monitor (fake-monitor test) | Pass |
 | Pass-through | On via toolbar: click-through set, toolbar hidden, badge on the covered monitor. Monitor switch while on: badge follows, click-through kept. Off via badge: input, toolbar and button state restored | Pass |
+| Drawing region and margin (#10) | Self-test on each of the 3 monitors (200% / 175% / 100%): black backdrop in a region with a white margin, then a native screen grab | Pass: 1 logical pixel inside every region edge is region and 2 outside is margin at each scale; grab pixel ratio equals the monitor's; region screenshot is exactly region plus margin at device resolution; strokes start only inside region or margin. Unit tests (fake 150% + 100% monitors): clipping, backdrop/margin restriction and independent opacity, eraser over the margin, selection by mouse and pen, Esc, monitor switch with clamping, settings. Repaint cost unchanged without a region; about 5% more per point with one. |
 | Hot-plug logic | Monitor added; monitor removed (the covered one, and another one); bursts of display events; resolution/scale change | Pass in unit tests on two fake offscreen monitors (150% + 100%), driving the overlay's own `screenAdded`/`screenRemoved`/`geometryChanged` handlers. **Not** with real hardware; see manual checklist. |
 | Settings migration | v1.0–v1.4.2 settings file; 1.5.0 development-build `screens = all/auto` (user file and lab-wide INI, CLI flag); newer-version file; read-only file; missing file | Pass: brush settings carry over unchanged, legacy screen modes become `cursor` with a logged note, newer files untouched, read-only files still load |
 | Builds | Frozen exe built with Python 3.13.17 + PySide6 6.8.3; source runs with Python 3.9.13 + PySide6 6.7.3 and Python 3.13 + 6.8.3 | Pass: `--selftest`, 64 unit tests on both Qt versions |
@@ -85,6 +86,8 @@ exercises the toolbar and pass-through (see `crit_overlay/selftest.py`).
 | Redirected folders | Pictures/AppData on OneDrive or a UNC share; share offline | Paths resolve through `SHGetKnownFolderPath` with local fallbacks (unit-tested with simulated failures) |
 | Running from a network share | | Should work, with slower startup |
 | Qt 6 DCC apps on the lab image | Maya 2025, Houdini 20.5, Nuke 15 setting `QT_PLUGIN_PATH` | Variables are cleared at startup; tested with a fake plugin, not a real Qt 6 install |
+| Drawing region with a real pen | | Selection and drawing go through the same input paths as normal strokes (tested with synthetic events); real pen use is on the manual checklist |
+| Region screenshot on Windows 10 | | Uses the same `QScreen.grabWindow` call as the existing full-monitor screenshot, with a sub-rectangle |
 | Building with Python 3.12 | | Lock installs (all wheels pure Python or abi3); only 3.13 actually built |
 
 ## Manual validation required before release
@@ -127,6 +130,13 @@ a person at the machine, and they're the release gate. Record the machine
     logoff.
 13. Upgrade path: on a machine with v1.4.2 settings, confirm brush
     settings carry over.
+
+**Drawing region** (#10)
+14. With the pen, press R and drag a region over an image on each monitor
+    (including a scaled one), then draw inside, across the edge, and in the
+    margin. Strokes stop at the margin's outer edge and can't start
+    outside. F9 saves only region plus margin, with no desktop in the
+    margin. Esc during a selection cancels it without closing the app.
 
 ## Automated release check
 

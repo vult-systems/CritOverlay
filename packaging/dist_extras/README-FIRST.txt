@@ -34,6 +34,12 @@ Monitors
   monitor, e.g. from your laptop to the projector. Your drawing moves with
   it. If the monitor it's on is unplugged, it moves to the primary one.
 
+Drawing region
+  Press R (or the dashed-frame button on the toolbar) and drag a rectangle
+  to draw only on one part of the screen, with an optional margin around it
+  for notes. F9 then saves just that area. Esc cancels a selection; a plain
+  click goes back to the full monitor.
+
 Files it writes
   Logs:        %LOCALAPPDATA%\CritOverlay\logs\
   Settings:    %APPDATA%\CritOverlay\Crit Overlay.ini
