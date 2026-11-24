@@ -5,7 +5,7 @@ Keeps naming and versioning in one place for config.py and packaging.
 
 APP_NAME = "Crit Overlay"
 ORG_NAME = "CritOverlay"
-APP_VERSION = "1.4.2"
+APP_VERSION = "1.5.0-rc.1"
 
 ACCENT = "#ff4b4b"
 
