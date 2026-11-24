@@ -5,7 +5,7 @@ going into the Windows registry (which some lab images reset at logoff).
 
 The file path comes from paths.py rather than QSettings' own lookup, so it
 follows folder redirection fallbacks and portable mode. By default it is the
-same file QSettings used before, %APPDATA%\CritOverlay\Crit Overlay.ini.
+same file QSettings used before, %APPDATA%\\CritOverlay\\Crit Overlay.ini.
 The [compat] section in it is read by compat.py before Qt starts.
 """
 
