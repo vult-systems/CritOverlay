@@ -97,11 +97,13 @@ monitors, pens, or managed lab machines. That stays a manual gate (below).
 
 ## Releasing
 
-1. Update `APP_VERSION` in `crit_overlay/constants.py` and add a
-   `## vX.Y.Z` (or `## vX.Y.Z-rc.N`) section to `CHANGELOG.md`. Commit and
-   push to `main`.
-2. Tag that commit and push the tag: `git tag -a v1.5.0-rc.2 -m "..."` and
-   `git push origin v1.5.0-rc.2`.
+1. In one release commit, update `APP_VERSION` in
+   `crit_overlay/constants.py` and rename `## Unreleased` in
+   `CHANGELOG.md` to `## vX.Y.Z` (or `## vX.Y.Z-rc.N`). A stable release
+   after release candidates gets its own `## vX.Y.Z` section. Merge the
+   commit to `main` through a pull request with CI green.
+2. Tag that commit on `main` and push the tag:
+   `git tag -a v1.5.0-rc.2 -m "..."` and `git push origin v1.5.0-rc.2`.
 3. `.github/workflows/release.yml` runs the full CI. If every job passes,
    it checks that the tag matches `APP_VERSION`, that the tag is `vX.Y.Z`
    or `vX.Y.Z-rc.N`, that the changelog has the section, and the zip's
