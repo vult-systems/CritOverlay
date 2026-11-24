@@ -1544,7 +1544,9 @@ class Overlay(QWidget):
                 rect = region_mod.selection_rect(self._selection_anchor, self._selection_point, self.rect())
                 self._paint_region_frame(painter, rect, selecting=True)
 
-            if not self.pass_through and self.cursor_pos and not self._selecting:
+            # Not while capturing: a real mouse move during the capture delay
+            # sets cursor_pos again and would put the ring in the screenshot.
+            if not self.pass_through and self.cursor_pos and not self._selecting and not self._capturing:
                 painter.save()
                 d = brush.width_for(self.brush_size, self._last_effective_pressure)
                 if self.mode == "eraser":
