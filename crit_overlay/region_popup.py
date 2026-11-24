@@ -54,7 +54,9 @@ class RegionPopup(QFrame):
         h.addWidget(self.full_btn)
 
         w, h = row()
-        self.margin_btn = text_button("Annotation margin", w, checkable=True)
+        # Says its state in words; a checked text button alone didn't read
+        # as an on/off switch (#13).
+        self.margin_btn = text_button("Margin: off", w, checkable=True)
         self.margin_btn.toggled.connect(overlay.set_margin_enabled)
         h.addWidget(self.margin_btn)
         h.addStretch(1)
@@ -68,16 +70,19 @@ class RegionPopup(QFrame):
             btn.clicked.connect(lambda checked=False, n=name: overlay.set_margin_color(n))
             h.addWidget(btn)
 
+        self._margin_row = w
         size_row, self.size_slider, self.size_label = overlay._build_slider_row(
             self, "MARGIN", C.MARGIN_MIN_SIZE, C.MARGIN_MAX_SIZE, overlay.margin_size,
             lambda v: f"{v}px", overlay.set_margin_size, None,
         )
         layout.addWidget(size_row)
+        self._size_row = size_row
         opacity_row, self.opacity_slider, self.opacity_label = overlay._build_slider_row(
             self, "OPACITY", 10, 100, int(round(overlay.margin_opacity * 100)),
             lambda v: f"{v}%", lambda v: overlay.set_margin_opacity(v / 100.0), None,
         )
         layout.addWidget(opacity_row)
+        self._opacity_row = opacity_row
 
         self.note = QLabel("", self)
         self.note.setObjectName("SliderValue")
@@ -96,10 +101,14 @@ class RegionPopup(QFrame):
         monitor switch while the popup is closed)."""
         o = self._overlay
         self.full_btn.setChecked(o.region is None)
-        for widget, value in ((self.margin_btn, o.margin_enabled),):
-            widget.blockSignals(True)
-            widget.setChecked(value)
-            widget.blockSignals(False)
+        self.margin_btn.blockSignals(True)
+        self.margin_btn.setChecked(o.margin_enabled)
+        self.margin_btn.blockSignals(False)
+        self.margin_btn.setText(f"Margin: {'on' if o.margin_enabled else 'off'}")
+        # A margin needs an area to surround; don't offer controls that
+        # can't show anything yet.
+        for widget in (self._margin_row, self._size_row, self._opacity_row):
+            widget.setEnabled(o.region is not None)
         self.white_btn.setChecked(o.margin_color == "white")
         self.black_btn.setChecked(o.margin_color == "black")
         for slider, label, value, text in (
@@ -112,7 +121,7 @@ class RegionPopup(QFrame):
             slider.blockSignals(False)
             label.setText(text)
         if o.region is None:
-            self.note.setText("Margin applies once an area is selected")
+            self.note.setText("Select an area to add a margin around it")
         else:
             r = o.region
             self.note.setText(f"Area {r.width()} x {r.height()} at {r.x()}, {r.y()}")
