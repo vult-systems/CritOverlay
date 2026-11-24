@@ -1,0 +1,127 @@
+# Lint, unit tests and the standalone build on every push and pull request.
+# Also called by release.yml, so a tag only gets a draft release if all of
+# this passes. Hardware and lab-machine acceptance stays a manual gate
+# (docs/COMPATIBILITY.md, "Manual validation required before release").
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Same interpreter as the locked release toolchain (build_info.json records it).
+  BUILD_PYTHON: "3.13.17"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  lint:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.BUILD_PYTHON }}
+      - run: "python -m pip install --require-hashes --only-binary=:all: -r packaging/requirements-lint.txt"
+      - run: python -m pyflakes crit_overlay packaging tests
+      # Invalid escapes etc. are only warnings today; fail on them now.
+      - run: python -W error -m compileall -q -f crit_overlay packaging tests
+
+  test:
+    name: test (${{ matrix.os }}, Python ${{ matrix.python }}, ${{ matrix.qt }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Release toolchain: the hash-locked PySide6 from the build lock.
+          - { os: windows-2025, python: "3.13.17", qt: locked, deps: "-r packaging/requirements-build.txt --require-hashes" }
+          - { os: windows-2022, python: "3.13.17", qt: locked, deps: "-r packaging/requirements-build.txt --require-hashes" }
+          - { os: windows-2025, python: "3.12", qt: locked, deps: "-r packaging/requirements-build.txt --require-hashes" }
+          # Oldest configuration documented for running from source.
+          - { os: windows-2022, python: "3.9", qt: "PySide6 6.7.3", deps: "PySide6-Essentials==6.7.3" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      - run: "python -m pip install --only-binary=:all: ${{ matrix.deps }}"
+      - run: python -m unittest discover -s tests -t . -v
+
+  build:
+    name: build (${{ matrix.os }})
+    needs: [lint, test]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        id: py
+        with:
+          python-version: ${{ env.BUILD_PYTHON }}
+      # The same script as a local release build: hash-locked venv,
+      # PyInstaller, static DLL audit, self-tests in clean/polluted/non-ASCII
+      # environments, zip and SHA256SUMS.txt.
+      - name: packaging\build.bat
+        shell: cmd
+        env:
+          CRIT_PYTHON: ${{ steps.py.outputs.python-path }}
+          CRIT_NO_PAUSE: "1"
+        run: call packaging\build.bat
+      - name: Summary
+        shell: bash
+        run: |
+          {
+            echo "### Build on ${{ matrix.os }}"
+            echo '```'
+            cat dist/SHA256SUMS.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: CritOverlay-win64-${{ matrix.os }}
+          path: |
+            dist/CritOverlay-v*-win64.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  # Informational: is the bundle of one commit identical across runner
+  # images? Compares every file in the two zips. build_info.json records
+  # the build host's Windows version, so it is expected to differ.
+  # Doesn't fail the run.
+  reproducibility:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: CritOverlay-win64-*
+      - shell: python
+        run: |
+          import glob, hashlib, os, zipfile
+          def files(runner):
+              (path,) = glob.glob(f"CritOverlay-win64-{runner}/*.zip")
+              z = zipfile.ZipFile(path)
+              return {i.filename: hashlib.sha256(z.read(i)).hexdigest() for i in z.infolist() if not i.is_dir()}
+          a, b = files("windows-2025"), files("windows-2022")
+          differ = sorted(n for n in a.keys() | b.keys() if a.get(n) != b.get(n))
+          unexpected = [n for n in differ if not n.endswith("/_internal/build_info.json")]
+          if unexpected:
+              msg = f"{len(unexpected)} of {len(a)} files differ between windows-2025 and windows-2022: " + ", ".join(unexpected)
+          else:
+              msg = f"All {len(a)} files identical on windows-2025 and windows-2022 (apart from build_info.json's build host)."
+          print(msg)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write(f"### Reproducibility\n{msg}\n")

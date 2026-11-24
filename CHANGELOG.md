@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+**Build**
+
+- GitHub Actions CI on every push and pull request (#7). It runs pyflakes,
+  compiles with warnings as errors, and runs the unit tests on Windows
+  Server 2022/2025 with Python 3.13, 3.12 (locked PySide6 6.8.3) and 3.9
+  (PySide6 6.7.3). It also runs `packaging\build.bat` on both runners and
+  uploads the zip and `SHA256SUMS.txt`.
+- Pushing a version tag creates a draft release from the CI-built zip, only
+  if every check passes and the tag matches `APP_VERSION` and the
+  changelog. Publishing stays manual, after hardware acceptance for stable
+  releases.
+
 ## v1.5.0-rc.1 (pre-release)
 
 Hardening for school and work machines. This is a release candidate:

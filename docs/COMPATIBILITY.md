@@ -130,8 +130,14 @@ a person at the machine, and they're the release gate. Record the machine
 
 ## Automated release check
 
-`packaging\build.bat` runs all of these and fails the build otherwise: the
-static audit, `--selftest` in clean, polluted and non-ASCII-path
-environments, and (via `python -m unittest discover -s tests -t .`, run
-separately) the unit tests. On a machine with several monitors, the
-build's self-test also tours every monitor.
+`packaging\build.bat` runs the static audit and `--selftest` in clean,
+polluted and non-ASCII-path environments, and fails the build otherwise.
+On a machine with several monitors, the build's self-test also tours every
+monitor.
+
+CI (`.github/workflows/ci.yml`) runs lint, the unit tests, and
+`build.bat` on Windows Server 2022 and 2025 runners for every push and pull
+request. A version tag gets a draft release only if all of that passes (see
+[BUILDING.md](BUILDING.md#releasing)). CI runners are single-monitor
+servers without pens, so they don't replace the manual checklist above.
+That checklist remains the gate for a stable release.

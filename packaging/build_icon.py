@@ -15,6 +15,7 @@ from crit_overlay.icon import build_app_icon
 
 
 def main():
+    # QPainter needs a QGuiApplication alive while the icon is rendered.
     app = QGuiApplication(sys.argv)
     icon = build_app_icon(256)
 
@@ -28,6 +29,7 @@ def main():
         print("Failed to save icon", file=sys.stderr)
         return 1
     print(f"Wrote {out}")
+    del app
     return 0
 
 

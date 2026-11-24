@@ -51,9 +51,18 @@ still runs the static checks.
   in every diagnostics report and log.
 
 Two consecutive clean builds on the same machine produced byte-identical
-exes and zip. Cross-machine reproducibility (different Windows build or
-Python patch version) hasn't been checked. Python patch versions in
-particular can differ.
+exes and zip. Across machines:
+
+- **CI runner images** (Windows Server 2022 and 2025, same Python 3.13.17):
+  every bundled file is identical except `build_info.json`, which records
+  the build host.
+- **CI vs a Windows 11 workstation:** the exes and the Universal CRT DLLs
+  (`ucrtbase.dll`, `api-ms-win-*.dll`) differ. PyInstaller copies the UCRT
+  from the build host, and CI bundles 3 more `api-ms-win-*` forwarders.
+  Both bundles pass the same audit and self-tests.
+
+So release assets come from CI (see [Releasing](#releasing)). A local
+build is for testing.
 
 ## Verification (`packaging\verify_build.py`)
 
@@ -70,6 +79,49 @@ Runs automatically at the end of the build:
    Qt variables), polluted (junk `QT_*`/`PYTHON*` variables and a fake
    `qwindows.dll` and Python DLL on PATH), and from a folder whose name
    has spaces and non-ASCII characters.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and pull request:
+
+| Job | What |
+|---|---|
+| lint | pyflakes (hash-pinned in `packaging/requirements-lint.txt`) and a compile with warnings as errors |
+| test | Unit tests on windows-2025 and windows-2022: Python 3.13.17 and 3.12 with the locked PySide6 6.8.3, and Python 3.9 with PySide6 6.7.3 (oldest source configuration) |
+| build | `packaginguild.bat` itself (with `CRIT_PYTHON` and `CRIT_NO_PAUSE=1`) on windows-2025 and windows-2022: locked toolchain, static DLL audit, self-tests, zip and `SHA256SUMS.txt`, uploaded as artifacts |
+| reproducibility | Compares every file in the two runners' zips; only `build_info.json` (build host) should differ. Informational only; it doesn't fail the run. |
+
+The hosted runners are Windows Server 2022 and 2025, single monitor at
+100%. CI therefore can't stand in for client Windows 10/11, mixed-DPI
+monitors, pens, or managed lab machines. That stays a manual gate (below).
+
+## Releasing
+
+1. In one release commit, update `APP_VERSION` in
+   `crit_overlay/constants.py` and rename `## Unreleased` in
+   `CHANGELOG.md` to `## vX.Y.Z` (or `## vX.Y.Z-rc.N`). A stable release
+   after release candidates gets its own `## vX.Y.Z` section. Merge the
+   commit to `main` through a pull request with CI green.
+2. Tag that commit on `main` and push the tag:
+   `git tag -a v1.5.0-rc.2 -m "..."` and `git push origin v1.5.0-rc.2`.
+3. `.github/workflows/release.yml` runs the full CI. If every job passes,
+   it checks that the tag matches `APP_VERSION`, that the tag is `vX.Y.Z`
+   or `vX.Y.Z-rc.N`, that the changelog has the section, and the zip's
+   checksum. Then it creates a **draft** release with the windows-2025
+   zip, `SHA256SUMS.txt`, and the changelog section plus hashes as notes.
+   Release candidates are drafted as pre-releases. If any check fails,
+   no release is created.
+4. Edit the draft notes (Verified / Not yet verified / known issues) and
+   publish it by hand.
+   - **Release candidate:** publish as a pre-release, without making it
+     the latest release.
+   - **Stable release:** publish only after the [manual
+     validation](COMPATIBILITY.md#manual-validation-required-before-release)
+     checklist passes on real hardware and a lab machine.
+
+Release assets come from CI, not from a local build. A local
+`packaginguild.bat` is still the way to test the build and to run the
+self-test across several real monitors.
 
 ## Offline / restricted-network builds
 
