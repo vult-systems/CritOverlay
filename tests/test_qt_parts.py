@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests import qt_env  # noqa: F401  (must come before other PySide6 imports)
+from tests import qt_env  # must come before other PySide6 imports
 
 from PySide6.QtCore import QPoint, QPointF, QSettings, QSize  # noqa: E402
 
@@ -15,6 +15,10 @@ from crit_overlay import brush  # noqa: E402
 from crit_overlay import constants as C  # noqa: E402
 from crit_overlay.config import SETTINGS_VERSION, AppConfig  # noqa: E402
 from crit_overlay.models import Stroke  # noqa: E402
+
+# One QApplication per process, on the offscreen platform with fake monitors.
+APP = qt_env.app
+
 
 class LayerTests(unittest.TestCase):
     def test_new_layer_matches_device_pixels(self):
