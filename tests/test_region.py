@@ -134,7 +134,9 @@ class MarginSettingsTests(unittest.TestCase):
         self.assertEqual(loaded["margin_opacity"], C.DEFAULT_MARGIN_OPACITY)
 
 
-class OverlayRegionTests(unittest.TestCase):
+class OverlayCase(unittest.TestCase):
+    """Overlay on the fake 150% laptop, with painting helpers."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         settings = Path(self.tmp.name) / "settings.ini"
@@ -172,10 +174,12 @@ class OverlayRegionTests(unittest.TestCase):
         return pm.toImage().pixelColor(int(x * dpr), int(y * dpr)).getRgb()
 
     def set_area(self, margin=False):
+        self.o.set_margin_size(60)  # (turns the margin on, #13)
         self.o.set_margin_enabled(margin)
-        self.o.set_margin_size(60)
         self.o.set_region(QRect(400, 400, 600, 400))
 
+
+class OverlayRegionTests(OverlayCase):
     # -- input and display restriction ------------------------------------
 
     def test_full_monitor_by_default(self):
@@ -371,6 +375,7 @@ class OverlayRegionTests(unittest.TestCase):
         popup = o._region_popup
         self.assertFalse(popup.full_btn.isChecked())
         self.assertTrue(popup.margin_btn.isChecked())
+        self.assertEqual(popup.margin_btn.text(), "Margin: on")
         popup.size_slider.setValue(90)
         self.assertEqual((o.margin_size, popup.size_label.text()), (90, "90px"))
         popup.black_btn.click()
@@ -379,6 +384,122 @@ class OverlayRegionTests(unittest.TestCase):
         self.assertIsNone(o.region)
         self.assertTrue(popup.full_btn.isChecked())
         popup.close()
+
+
+class MarginVisibilityTests(OverlayCase):
+    """#13: in rc.2 the margin stayed off after selecting a region, while
+    thickness/color/opacity looked active and did nothing; slider drags
+    didn't redraw until the mouse paused."""
+
+    def region_only(self):
+        o = self.o
+        o.set_margin_enabled(False)
+        o.set_region(QRect(400, 400, 600, 400))
+        self.assertFalse(o.margin_enabled)
+        self.assertLessEqual(self.painted(390, 600)[3], 1, "no margin yet")
+
+    def open_popup(self):
+        self.o._show_region_popup()
+        self.addCleanup(self.o._region_popup.close)
+        return self.o._region_popup
+
+    def test_each_margin_control_turns_the_margin_on(self):
+        for adjust in (lambda p: p.size_slider.setValue(80),
+                       lambda p: p.opacity_slider.setValue(60),
+                       lambda p: p.black_btn.click(),
+                       lambda p: p.white_btn.click()):
+            self.region_only()
+            popup = self.open_popup()
+            adjust(popup)
+            self.assertTrue(self.o.margin_enabled)
+            self.assertTrue(popup.margin_btn.isChecked())
+            self.assertEqual(popup.margin_btn.text(), "Margin: on")
+            self.assertGreater(self.painted(390, 600)[3], 1, "margin visible outside the region")
+            popup.close()
+
+    def test_reported_flow_margin_visible_and_in_screenshot(self):
+        # Select an area, open the popup, drag the thickness and opacity
+        # sliders (the steps from #13), then F9.
+        o = self.o
+        o.set_margin_enabled(False)
+        o.begin_region_selection()
+        for kind, (x, y) in (("press", (400, 400)), ("move", (700, 600)), ("release", (1000, 800))):
+            o._selection_input(kind, QPointF(x, y))
+        popup = self.open_popup()
+        popup.size_slider.setValue(100)
+        popup.opacity_slider.setValue(50)
+        self.assertEqual((o.margin_size, round(o.margin_opacity, 2)), (100, 0.5))
+        r, g, b, a = self.painted(330, 600)  # 70 px left of the region, inside the 100 px margin
+        self.assertEqual((r, g, b), (255, 255, 255))
+        self.assertAlmostEqual(a, 128, delta=1)
+        self.assertLessEqual(self.painted(250, 600)[3], 1, "nothing beyond the margin")
+
+        screen = o._target_screen
+        dpr = screen.devicePixelRatio()
+
+        def fake_grab(_screen, _wid, x, y, w, h):
+            pm = QPixmap(round(w * dpr), round(h * dpr))
+            pm.fill(QColor(10, 200, 10))
+            return pm
+
+        with mock.patch.object(type(screen), "grabWindow", fake_grab):
+            shot = o.capture_region_pixmap().toImage()
+        outer = o.drawable_rect()
+        self.assertEqual(outer, QRect(300, 300, 800, 600))
+        self.assertEqual((shot.width(), shot.height()), (round(800 * dpr), round(600 * dpr)))
+        self.assertEqual(shot.pixelColor(int(50 * dpr), int(300 * dpr)).getRgb()[:3], (255, 255, 255),
+                         "margin in the screenshot")
+        self.assertEqual(shot.pixelColor(int(400 * dpr), int(300 * dpr)).getRgb()[:3], (10, 200, 10),
+                         "region in the screenshot")
+
+    def test_margin_controls_disabled_without_an_area(self):
+        o = self.o
+        popup = self.open_popup()
+        for widget in (popup.margin_btn, popup.size_slider, popup.opacity_slider, popup.white_btn):
+            self.assertFalse(widget.isEnabled())
+        self.assertIn("Select an area", popup.note.text())
+        o.set_region(QRect(400, 400, 600, 400))
+        for widget in (popup.margin_btn, popup.size_slider, popup.opacity_slider, popup.white_btn):
+            self.assertTrue(widget.isEnabled())
+
+    def test_toggle_label_tracks_state(self):
+        self.region_only()
+        popup = self.open_popup()
+        self.assertEqual(popup.margin_btn.text(), "Margin: off")
+        popup.margin_btn.click()
+        self.assertTrue(self.o.margin_enabled)
+        self.assertEqual(popup.margin_btn.text(), "Margin: on")
+        popup.margin_btn.click()
+        self.assertFalse(self.o.margin_enabled)
+        self.assertEqual(popup.margin_btn.text(), "Margin: off")
+
+    def test_margin_changes_repaint_immediately(self):
+        o = self.o
+        self.region_only()
+        o.set_margin_size(40)
+        before = o.drawable_rect()
+        with mock.patch.object(o, "update") as update:
+            o.set_margin_size(120)
+        update.assert_called_once()
+        (dirty,), _ = update.call_args
+        self.assertTrue(dirty.contains(before) and dirty.contains(o.drawable_rect()))
+        self.assertFalse(o._backdrop_rebuild_timer.isActive(), "no restarting debounce")
+
+    def test_draw_and_erase_in_margin_keep_backdrop_and_margin(self):
+        o = self.o
+        o._set_backdrop("black")
+        o._set_backdrop_opacity(100)
+        o.set_margin_opacity(1.0)
+        o.set_margin_color("white")
+        self.set_area(margin=True)
+        o._set_color("#ff0000")
+        self.stroke((350, 600), dx=10, n=12)  # from the margin into the region
+        self.assertEqual(self.painted(360, 600)[:3], (255, 0, 0))
+        self.assertEqual(self.painted(440, 600)[:3], (255, 0, 0))
+        o._set_mode("eraser")
+        self.stroke((350, 600), dx=10, n=12)
+        self.assertEqual(self.painted(360, 600), (255, 255, 255, 255), "margin layer intact")
+        self.assertEqual(self.painted(440, 600), (0, 0, 0, 255), "backdrop layer intact")
 
 
 if __name__ == "__main__":

@@ -61,6 +61,12 @@ If it does happen:
 
 ## Drawing region
 
+**No margin around the selected area.** The margin is off until you turn it
+on in the region menu ("Margin: on") or change its thickness, color or
+opacity. Its controls are greyed out until an area is selected. A margin
+also can't extend past the monitor edge, so a region touching the edge has
+no margin on that side.
+
 **Strokes don't start, or stop partway, in part of the screen.** A drawing
 region is set: drawing is limited to it and its margin (the dashed frame).
 Press R and click once, or choose *Full monitor* in the toolbar's region

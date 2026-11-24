@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- The annotation margin didn't appear after selecting a region (#13). It
+  is off by default, and only a text button ("Annotation margin") turned it
+  on, while thickness, color and opacity looked active and did nothing.
+  - Adjusting any of them now turns the margin on.
+  - The toggle reads "Margin: on/off".
+  - The margin controls are disabled until an area is selected.
+  - Margin changes repaint immediately. A restarting debounce timer meant
+    nothing redrew while a slider was being dragged.
+  - Rendering, clipping and DPI mapping were already correct.
+
 ## v1.5.0-rc.2 (pre-release)
 
 Second release candidate for v1.5.0. It adds the drawing region and the

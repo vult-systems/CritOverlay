@@ -923,26 +923,42 @@ class Overlay(QWidget):
         return rect.adjusted(-3, -3, 3, 3)
 
     def set_margin_enabled(self, enabled):
+        before = self.drawable_rect()
         self.margin_enabled = bool(enabled)
-        self._region_settings_changed()
+        self._region_settings_changed(before)
+
+    # Adjusting thickness, color or opacity turns the margin on: those
+    # controls are only ever touched to see a margin, and leaving it off
+    # made them look broken (#13).
 
     def set_margin_size(self, value):
+        before = self.drawable_rect()
         self.margin_size = max(C.MARGIN_MIN_SIZE, min(C.MARGIN_MAX_SIZE, int(round(value))))
-        self._region_settings_changed()
+        self.margin_enabled = True
+        self._region_settings_changed(before)
 
     def set_margin_color(self, name):
+        before = self.drawable_rect()
         self.margin_color = name if name in region_mod.MARGIN_COLORS else C.DEFAULT_MARGIN_COLOR
-        self._region_settings_changed()
+        self.margin_enabled = True
+        self._region_settings_changed(before)
 
     def set_margin_opacity(self, value):
+        before = self.drawable_rect()
         self.margin_opacity = max(0.1, min(1.0, float(value)))
-        self._region_settings_changed()
+        self.margin_enabled = True
+        self._region_settings_changed(before)
 
-    def _region_settings_changed(self):
+    def _region_settings_changed(self, before):
         self._save_settings()
         self._sync_region_popup()
-        # Fills and a clip change only; the canvas itself is untouched.
-        self._backdrop_rebuild_timer.start(30)
+        # Repaint the old and new margin area now. A restarting debounce
+        # timer here meant no redraw at all while a slider was being
+        # dragged (#13); Qt already merges update() calls into one paint
+        # per event-loop pass. Fills and the clip only; the canvas is
+        # untouched.
+        if self.region is not None:
+            self.update(before.united(self.drawable_rect()).adjusted(-2, -2, 2, 2))
 
     def _sync_region_popup(self):
         if self._region_popup is not None and self._region_popup.isVisible():
