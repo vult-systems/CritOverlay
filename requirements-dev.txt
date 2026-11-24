@@ -1,2 +1,3 @@
--r requirements.txt
-pyinstaller>=6.0
+# Exact, hash-pinned build toolchain (PySide6-Essentials + PyInstaller).
+# Installed automatically by packaging\build.bat into .venv-build.
+-r packaging/requirements-build.txt

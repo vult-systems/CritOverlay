@@ -1,0 +1,29 @@
+; Machine-wide defaults for Crit Overlay. Rename to CritOverlay.ini (next to
+; CritOverlay.exe) to use it. Per-user settings and command-line flags
+; override these. The same keys work in a [compat] section of the user's
+; %APPDATA%\CritOverlay\Crit Overlay.ini (except portable).
+
+[compat]
+; true: keep settings, logs and screenshots in CritOverlay-data\ beside the exe
+; (falls back to the user profile if this folder is read-only).
+portable = false
+
+; auto  - pen input through Windows Ink, with pressure (default). If the pen
+;         has no pressure, turn on "Use Windows Ink" for CritOverlay.exe in
+;         the tablet driver's per-application settings.
+; mouse - ignore tablet events entirely; use when a tablet driver causes
+;         missing, doubled or stuck strokes. No pressure.
+input = auto
+
+; The overlay covers one monitor at a time; the toolbar's monitor button
+; or F7 moves it to the next. This picks where it starts:
+; cursor  - the monitor under the mouse at launch (default)
+; primary - the primary monitor
+screens = cursor
+
+; true: mouse input, starting on the primary monitor.
+safe_mode = false
+
+; Save screenshots here first (environment variables allowed). Leave empty
+; for Pictures\CritOverlay.
+screenshot_dir =
