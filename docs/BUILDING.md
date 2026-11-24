@@ -71,6 +71,47 @@ Runs automatically at the end of the build:
    `qwindows.dll` and Python DLL on PATH), and from a folder whose name
    has spaces and non-ASCII characters.
 
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and pull request:
+
+| Job | What |
+|---|---|
+| lint | pyflakes (hash-pinned in `packaging/requirements-lint.txt`) and a compile with warnings as errors |
+| test | Unit tests on windows-2025 and windows-2022: Python 3.13.17 and 3.12 with the locked PySide6 6.8.3, and Python 3.9 with PySide6 6.7.3 (oldest source configuration) |
+| build | `packaginguild.bat` itself (with `CRIT_PYTHON` and `CRIT_NO_PAUSE=1`) on windows-2025 and windows-2022: locked toolchain, static DLL audit, self-tests, zip and `SHA256SUMS.txt`, uploaded as artifacts |
+| reproducibility | Compares the two runners' hashes. Informational only; it doesn't fail the run. |
+
+The hosted runners are Windows Server 2022 and 2025, single monitor at
+100%. CI therefore can't stand in for client Windows 10/11, mixed-DPI
+monitors, pens, or managed lab machines. That stays a manual gate (below).
+
+## Releasing
+
+1. Update `APP_VERSION` in `crit_overlay/constants.py` and add a
+   `## vX.Y.Z` (or `## vX.Y.Z-rc.N`) section to `CHANGELOG.md`. Commit and
+   push to `main`.
+2. Tag that commit and push the tag: `git tag -a v1.5.0-rc.2 -m "..."` and
+   `git push origin v1.5.0-rc.2`.
+3. `.github/workflows/release.yml` runs the full CI. If every job passes,
+   it checks that the tag matches `APP_VERSION`, that the tag is `vX.Y.Z`
+   or `vX.Y.Z-rc.N`, that the changelog has the section, and the zip's
+   checksum. Then it creates a **draft** release with the windows-2025
+   zip, `SHA256SUMS.txt`, and the changelog section plus hashes as notes.
+   Release candidates are drafted as pre-releases. If any check fails,
+   no release is created.
+4. Edit the draft notes (Verified / Not yet verified / known issues) and
+   publish it by hand.
+   - **Release candidate:** publish as a pre-release, without making it
+     the latest release.
+   - **Stable release:** publish only after the [manual
+     validation](COMPATIBILITY.md#manual-validation-required-before-release)
+     checklist passes on real hardware and a lab machine.
+
+Release assets come from CI, not from a local build. A local
+`packaginguild.bat` is still the way to test the build and to run the
+self-test across several real monitors.
+
 ## Offline / restricted-network builds
 
 On a machine with internet access:
