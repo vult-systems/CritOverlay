@@ -7,7 +7,7 @@ from the code, but nobody has run it. Move a row from Assumed to Tested only
 after running the [manual checklist](#manual-validation-required-before-release)
 there.
 
-Last updated for **v1.5.0-rc.1**: PySide6 / Qt 6.8.3, PyInstaller 6.22.3,
+Last updated for **v1.5.0-rc.2**: PySide6 / Qt 6.8.3, PyInstaller 6.22.3,
 bundled Python **3.13.17**.
 
 ## Supported platform
@@ -92,8 +92,8 @@ exercises the toolbar and pass-through (see `crit_overlay/selftest.py`).
 
 ## Manual validation required before release
 
-The automated checks can't cover these. None are done for v1.5.0-rc.1
-(tracked in the acceptance-testing issue on GitHub). Each needs
+The automated checks can't cover these. None are done for v1.5.0-rc.2
+(tracked in #4). Each needs
 a person at the machine, and they're the release gate. Record the machine
 (Windows build, GPU, monitors with scale, pen model) next to each result.
 
