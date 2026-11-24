@@ -104,6 +104,9 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(cfg.load(), {
             "color": "#4dabf7", "size": 23, "opacity": 0.8, "smoothing": 0.25,
             "backdrop": "white", "backdrop_opacity": 0.65,
+            # Added after v1.4.2 (#10): absent from old files, so defaults.
+            "margin_enabled": C.DEFAULT_MARGIN_ENABLED, "margin_size": C.DEFAULT_MARGIN_SIZE,
+            "margin_color": C.DEFAULT_MARGIN_COLOR, "margin_opacity": C.DEFAULT_MARGIN_OPACITY,
         })
         q = QSettings(str(self.path), QSettings.Format.IniFormat)
         self.assertEqual(int(q.value("meta/settings_version")), SETTINGS_VERSION)
