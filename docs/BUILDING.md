@@ -51,9 +51,18 @@ still runs the static checks.
   in every diagnostics report and log.
 
 Two consecutive clean builds on the same machine produced byte-identical
-exes and zip. Cross-machine reproducibility (different Windows build or
-Python patch version) hasn't been checked. Python patch versions in
-particular can differ.
+exes and zip. Across machines:
+
+- **CI runner images** (Windows Server 2022 and 2025, same Python 3.13.17):
+  every bundled file is identical except `build_info.json`, which records
+  the build host.
+- **CI vs a Windows 11 workstation:** the exes and the Universal CRT DLLs
+  (`ucrtbase.dll`, `api-ms-win-*.dll`) differ. PyInstaller copies the UCRT
+  from the build host, and CI bundles 3 more `api-ms-win-*` forwarders.
+  Both bundles pass the same audit and self-tests.
+
+So release assets come from CI (see [Releasing](#releasing)). A local
+build is for testing.
 
 ## Verification (`packaging\verify_build.py`)
 
@@ -80,7 +89,7 @@ Runs automatically at the end of the build:
 | lint | pyflakes (hash-pinned in `packaging/requirements-lint.txt`) and a compile with warnings as errors |
 | test | Unit tests on windows-2025 and windows-2022: Python 3.13.17 and 3.12 with the locked PySide6 6.8.3, and Python 3.9 with PySide6 6.7.3 (oldest source configuration) |
 | build | `packaginguild.bat` itself (with `CRIT_PYTHON` and `CRIT_NO_PAUSE=1`) on windows-2025 and windows-2022: locked toolchain, static DLL audit, self-tests, zip and `SHA256SUMS.txt`, uploaded as artifacts |
-| reproducibility | Compares the two runners' hashes. Informational only; it doesn't fail the run. |
+| reproducibility | Compares every file in the two runners' zips; only `build_info.json` (build host) should differ. Informational only; it doesn't fail the run. |
 
 The hosted runners are Windows Server 2022 and 2025, single monitor at
 100%. CI therefore can't stand in for client Windows 10/11, mixed-DPI
