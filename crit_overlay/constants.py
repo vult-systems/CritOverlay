@@ -33,6 +33,16 @@ DEFAULT_PRESSURE = 0.65
 DEFAULT_BACKDROP = None  # None | "white" | "black"
 DEFAULT_BACKDROP_OPACITY = 0.5
 
+# Drawing region (see region.py). Sizes are logical pixels, so they look the
+# same at any display scale.
+MIN_REGION_SIZE = 32  # a smaller drag means "full monitor"
+MARGIN_MIN_SIZE = 16
+MARGIN_MAX_SIZE = 400
+DEFAULT_MARGIN_ENABLED = False
+DEFAULT_MARGIN_SIZE = 120
+DEFAULT_MARGIN_COLOR = "white"  # "white" | "black"
+DEFAULT_MARGIN_OPACITY = 1.0
+
 # Past this many strokes the oldest is dropped, so a long session doesn't
 # grow memory without limit.
 MAX_STROKE_HISTORY = 300

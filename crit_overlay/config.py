@@ -102,15 +102,33 @@ class AppConfig:
             "backdrop_opacity": _clamp(
                 self._value("brush/backdrop_opacity", C.DEFAULT_BACKDROP_OPACITY, float), 0.1, 1.0
             ),
+            **self._load_margin(),
         }
 
-    def save(self, *, color, size, opacity, smoothing, backdrop, backdrop_opacity):
+    def _load_margin(self):
+        enabled = str(self._value("margin/enabled", C.DEFAULT_MARGIN_ENABLED, str)).strip().lower()
+        color = self._value("margin/color", C.DEFAULT_MARGIN_COLOR, str)
+        return {
+            "margin_enabled": enabled in ("1", "true", "yes", "on"),
+            "margin_size": int(_clamp(self._value("margin/size", C.DEFAULT_MARGIN_SIZE, int),
+                                      C.MARGIN_MIN_SIZE, C.MARGIN_MAX_SIZE)),
+            "margin_color": color if color in ("white", "black") else C.DEFAULT_MARGIN_COLOR,
+            "margin_opacity": _clamp(self._value("margin/opacity", C.DEFAULT_MARGIN_OPACITY, float), 0.1, 1.0),
+        }
+
+    def save(self, *, color, size, opacity, smoothing, backdrop, backdrop_opacity,
+             margin_enabled=C.DEFAULT_MARGIN_ENABLED, margin_size=C.DEFAULT_MARGIN_SIZE,
+             margin_color=C.DEFAULT_MARGIN_COLOR, margin_opacity=C.DEFAULT_MARGIN_OPACITY):
         self._settings.setValue("brush/color", QColor(color).name())
         self._settings.setValue("brush/size", int(size))
         self._settings.setValue("brush/opacity", float(opacity))
         self._settings.setValue("brush/smoothing", float(smoothing))
         self._settings.setValue("brush/backdrop", backdrop or _BACKDROP_NONE)
         self._settings.setValue("brush/backdrop_opacity", float(backdrop_opacity))
+        self._settings.setValue("margin/enabled", "true" if margin_enabled else "false")
+        self._settings.setValue("margin/size", int(margin_size))
+        self._settings.setValue("margin/color", margin_color)
+        self._settings.setValue("margin/opacity", float(margin_opacity))
         self._settings.sync()
         if self._settings.status() != QSettings.Status.NoError and not self._save_failed_logged:
             # Logged once: this is called on every debounced slider change.

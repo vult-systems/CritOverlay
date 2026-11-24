@@ -59,6 +59,20 @@ If it does happen:
    report.
 3. Try `--screens primary`.
 
+## Drawing region
+
+**Strokes don't start, or stop partway, in part of the screen.** A drawing
+region is set: drawing is limited to it and its margin (the dashed frame).
+Press R and click once, or choose *Full monitor* in the toolbar's region
+menu. Strokes that were cut off reappear in full.
+
+**Esc didn't close the app.** It was cancelling an area selection. Press
+Esc again to exit.
+
+**The screenshot is smaller than the monitor.** With a region set, F9 saves
+just the region and its margin. Go back to the full monitor for a
+whole-monitor screenshot.
+
 ## Pen and tablet problems
 
 | Symptom | Try |

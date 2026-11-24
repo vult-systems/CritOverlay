@@ -23,13 +23,17 @@ screen-sharing a paint-over is faster than describing what I mean.
   slider, for when the page underneath is too busy to draw over. It's a real
   layer, so erasing takes your strokes off it instead of punching through to
   the desktop.
+- A drawing region: restrict drawing to one rectangle, such as a student's
+  render, with an optional annotation margin around it for handwritten
+  notes. Screenshots then save just that area. See
+  [Drawing region and margin](#drawing-region-and-margin).
 - Undo and redo.
 - Pass-through mode (F8) to click into whatever is underneath without
   closing the overlay.
 - Screenshots of the monitor your cursor is on, saved to
   `Pictures\CritOverlay\` and opened in Explorer.
 - Tray icon to hide and show it without quitting.
-- Brush settings persist between sessions.
+- Brush and margin settings persist between sessions.
 
 ## Requirements
 
@@ -68,10 +72,11 @@ Or double-click `run.bat`. Use `run_debug.bat` if you want console logging.
 | Ctrl+Z | Undo |
 | Ctrl+Shift+Z | Redo |
 | [ / ] | Brush size down / up |
+| R | Select a drawing region (drag a rectangle; a plain click goes back to the full monitor) |
 | F7 | Move the overlay to the next monitor (same as the toolbar's monitor button) |
 | F8 | Toggle pass-through |
-| F9 | Screenshot the monitor under the cursor |
-| Esc | Exit |
+| F9 | Screenshot: the drawing region and its margin if one is set, otherwise the monitor under the cursor |
+| Esc | Cancel a region selection; otherwise exit |
 
 F8 and F9 are Qt shortcuts, so they need the overlay to have keyboard
 focus. Once you click into another app during pass-through, use the badge at
@@ -101,6 +106,34 @@ monitor always lines up and renders at that monitor's real resolution.
   switches. If the monitor the overlay is on is unplugged, it moves to the
   primary monitor. Resolution or scaling changes keep it on the same monitor.
 - Screenshots (F9) capture the monitor under the cursor, as before.
+
+## Drawing region and margin
+
+By default you draw anywhere on the monitor. To mark up one thing, such as a
+render in a viewer or a reference image, restrict drawing to a rectangle
+around it:
+
+- Press **R**, or click the **region button** on the toolbar (the dashed
+  frame next to the backdrop button) and choose *Select area*. Then drag a
+  rectangle with the pen or mouse. Esc cancels; a plain click, or *Full
+  monitor* in the same menu, goes back to the whole monitor.
+- Strokes start only inside the region and are cut off at its edge. Nothing
+  is deleted: going back to the full monitor shows strokes again in full.
+- The **backdrop** (and its intensity slider) covers only the region.
+- **Annotation margin** (in the region menu): a band around the region for
+  handwritten notes, with its own thickness, white or black color and
+  opacity, separate from the backdrop intensity. You can draw in it, and the
+  eraser takes strokes off it the same way it does on the backdrop.
+- **F9** with a region set saves just the region and its margin, at the
+  monitor's full resolution. The margin is saved solid in its color with
+  your notes on it, so nothing from the desktop around the region gets into
+  the image, even if the margin is translucent on screen.
+- The region is in the overlay's own coordinates, so it lines up exactly at
+  any display scaling. Moving to another monitor (F7) keeps the region and
+  your strokes where they were, moved inside the monitor if it's smaller.
+- Clicks outside the region don't reach the apps underneath; use
+  pass-through (F8) for that.
+- Margin settings are saved. The region itself lasts for the session.
 
 ## Options
 
@@ -173,6 +206,8 @@ crit_overlay/
   brush.py              smoothing, stroke dynamics, compositing
   icons.py              toolbar icons, drawn in code
   color_popup.py        the color swatch popup
+  region.py             drawing region and margin geometry, region screenshots
+  region_popup.py       the region and margin popup
   models.py             strokes and undo history
   config.py             saved settings
   logging_setup.py      rotating file logger

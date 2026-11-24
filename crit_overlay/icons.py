@@ -223,6 +223,22 @@ def monitor_glyph(painter, color, size):
     painter.drawLine(QPointF(size * 0.54, size * 0.53), QPointF(size * 0.65, size * 0.43))
 
 
+def region_glyph(painter, color, size):
+    # A dashed selection frame with solid corners: "drawing region".
+    pen = _stroke_pen(color, size * 0.08)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    a, b = size * 0.16, size * 0.84
+    c = size * 0.20
+    painter.setPen(pen)
+    for x, y, dx, dy in ((a, a, 1, 1), (b, a, -1, 1), (a, b, 1, -1), (b, b, -1, -1)):
+        painter.drawLine(QPointF(x, y), QPointF(x + dx * c, y))
+        painter.drawLine(QPointF(x, y), QPointF(x, y + dy * c))
+    dashed = _stroke_pen(color, size * 0.06)
+    dashed.setStyle(Qt.PenStyle.DotLine)
+    painter.setPen(dashed)
+    painter.drawRect(QRectF(size * 0.34, size * 0.34, size * 0.32, size * 0.32))
+
+
 _GLYPHS = {
     "brush": brush_glyph,
     "eraser": eraser_glyph,
@@ -236,6 +252,7 @@ _GLYPHS = {
     "backdrop_off": backdrop_off_glyph,
     "eyedropper": eyedropper_glyph,
     "monitor": monitor_glyph,
+    "region": region_glyph,
 }
 
 

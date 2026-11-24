@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+**Added**
+
+- **Drawing region and annotation margin** (#10). Press R (or use the new
+  region button on the toolbar) and drag a rectangle to limit drawing to
+  part of the monitor.
+  - Strokes start only inside the region and are clipped at its edge. The
+    clip is display-only, so going back to the full monitor shows them
+    again in full.
+  - The backdrop covers only the region.
+  - An optional margin around the region (thickness, white/black, opacity,
+    independent of the backdrop intensity) takes handwritten notes.
+  - F9 then saves exactly the region and margin at device resolution, with
+    the margin rendered solid so no surrounding desktop is captured.
+  - The region is kept in the overlay's logical coordinates, so it lines up
+    at any scale (checked against native screen grabs at 200%, 175% and
+    100%), and is moved inside a smaller monitor on F7.
+  - Esc now cancels an area selection before it exits the app. Margin
+    settings are saved; the region is per session.
+
+**Fixed**
+
+- The brush cursor ring could appear in a screenshot if the mouse moved
+  during the capture delay.
+
 **Build**
 
 - GitHub Actions CI on every push and pull request (#7). It runs pyflakes,

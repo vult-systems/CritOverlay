@@ -18,7 +18,7 @@ Exit code 0 when every check passes, 5 otherwise. The report goes to stdout
 import logging
 import sys
 
-from PySide6.QtCore import QEvent, QObject, QPointF, Qt, QTimer
+from PySide6.QtCore import QEvent, QObject, QPointF, QRect, Qt, QTimer
 from PySide6.QtGui import QGuiApplication, QMouseEvent
 
 from . import app as app_module
@@ -197,6 +197,88 @@ def _transparent(overlay):
     return bool(native_windows.get_ex_style(int(overlay.winId())) & native_windows.WS_EX_TRANSPARENT)
 
 
+def _region_steps(overlay, results, label):
+    """Drawing region on the real monitor (#10): paint a black backdrop in a
+    region with a white margin, grab the screen natively, and check the
+    edges land where they were painted, at this monitor's scale. Fields are
+    set directly (not through the setters), so nothing is saved."""
+    state = {}
+    margin = 40
+
+    def setup():
+        state.update(
+            backdrop=overlay.backdrop, backdrop_opacity=overlay.backdrop_opacity, region=overlay.region,
+            margin=(overlay.margin_enabled, overlay.margin_size, overlay.margin_color, overlay.margin_opacity),
+            panel=overlay.panel.isVisible(),
+        )
+        local = overlay.rect()
+        w, h = local.width() // 3, local.height() // 4
+        overlay.region = QRect((local.width() - w) // 2, local.height() // 2, w, h)
+        overlay.backdrop, overlay.backdrop_opacity = "black", 1.0
+        overlay.margin_enabled, overlay.margin_size, overlay.margin_color, overlay.margin_opacity = (
+            True, margin, "white", 1.0)
+        overlay._capturing = True
+        overlay.cursor_pos = None
+        overlay.panel.hide()
+        overlay.toast_label.hide()
+        overlay.update()
+
+    def check():
+        screen = overlay._target_screen
+        region = overlay.region
+        outer = overlay.drawable_rect()
+        g = outer.translated(overlay.geometry().topLeft() - screen.geometry().topLeft())
+        image = screen.grabWindow(0, g.x(), g.y(), g.width(), g.height()).toImage()
+        dpr = image.width() / max(1, outer.width())
+
+        def lightness(x, y):
+            return image.pixelColor(int((x - outer.x()) * dpr), int((y - outer.y()) * dpr)).lightness()
+
+        cx, cy = region.center().x(), region.center().y()
+        # One logical pixel in from each edge must be region, two out must
+        # be margin: alignment to about a pixel at this monitor's scale.
+        inside = [(region.left() + 1, cy), (region.right() - 1, cy), (cx, region.top() + 1), (cx, region.bottom() - 1)]
+        outside = [(region.left() - 2, cy), (region.right() + 2, cy), (cx, region.top() - 2), (cx, region.bottom() + 2)]
+        dark = [lightness(x, y) for x, y in inside]
+        light = [lightness(x, y) for x, y in outside]
+        aligned = all(v < 60 for v in dark) and all(v > 200 for v in light)
+        results.check(
+            f"{label}: drawing region and margin line up with a native screen grab",
+            aligned and abs(dpr - screen.devicePixelRatio()) < 0.02,
+            f"{screen.name()} @ {round(screen.devicePixelRatio() * 100)}%, grab {dpr:.3f}x, "
+            f"inside lightness {dark}, margin lightness {light}",
+        )
+
+        shot = overlay.capture_region_pixmap()
+        expected = (round(outer.width() * dpr), round(outer.height() * dpr))
+        results.check(f"{label}: region screenshot covers exactly region plus margin",
+                      abs(shot.width() - expected[0]) <= 1 and abs(shot.height() - expected[1]) <= 1,
+                      f"{shot.width()}x{shot.height()}, expected {expected[0]}x{expected[1]}")
+
+        overlay.history.clear()
+        overlay._rebuild_canvas()
+        overlay._begin_stroke(QPointF(outer.left() - 10, cy), 0.8)
+        overlay._end_stroke()
+        rejected = len(overlay.history) == 0
+        overlay._begin_stroke(QPointF(region.left() - margin // 2, cy), 0.8)
+        overlay._add_point(QPointF(region.left() + 20, cy), 0.8)
+        overlay._end_stroke()
+        accepted = len(overlay.history) == 1
+        overlay.clear()
+        results.check(f"{label}: strokes start inside region or margin only", rejected and accepted)
+
+    def restore():
+        overlay.region = state["region"]
+        overlay.backdrop, overlay.backdrop_opacity = state["backdrop"], state["backdrop_opacity"]
+        overlay.margin_enabled, overlay.margin_size, overlay.margin_color, overlay.margin_opacity = state["margin"]
+        overlay._capturing = False
+        if state["panel"]:
+            overlay.panel.show()
+        overlay.update()
+
+    return [(setup, 400), (check, 0), (restore, 100)]
+
+
 def _monitor_tour_steps(overlay, results):
     """Async steps: (action, wait_ms) pairs. Each action runs, then the event
     loop gets wait_ms so Windows can finish moving the window between
@@ -229,8 +311,12 @@ def _monitor_tour_steps(overlay, results):
         for i in range(total):
             steps.append((overlay.monitor_btn.click, 900))
             steps.append((check_here(f"Monitor button move {i + 1}/{total}"), 0))
+            steps += _region_steps(overlay, results, f"Monitor {i + 1}/{total}")
         steps.append((lambda: results.check("Monitor button cycles back to the starting monitor",
                                             overlay._target_screen is start), 0))
+
+    if total == 1:
+        steps += _region_steps(overlay, results, "Monitor 1/1")
 
     def pass_on():
         overlay.pass_btn.click()
