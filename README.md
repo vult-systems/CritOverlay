@@ -120,10 +120,12 @@ around it:
 - Strokes start only inside the region and are cut off at its edge. Nothing
   is deleted: going back to the full monitor shows strokes again in full.
 - The **backdrop** (and its intensity slider) covers only the region.
-- **Annotation margin** (in the region menu): a band around the region for
-  handwritten notes, with its own thickness, white or black color and
-  opacity, separate from the backdrop intensity. You can draw in it, and the
-  eraser takes strokes off it the same way it does on the backdrop.
+- **Annotation margin** (in the region menu, once an area is selected): a
+  band around the region for handwritten notes, with its own thickness,
+  white or black color and opacity, separate from the backdrop intensity.
+  It's off until you turn it on ("Margin: on") or adjust any of its
+  controls, and it updates as you drag. You can draw in it, and the eraser
+  takes strokes off it the same way it does on the backdrop.
 - **F9** with a region set saves just the region and its margin, at the
   monitor's full resolution. The margin is saved solid in its color with
   your notes on it, so nothing from the desktop around the region gets into
