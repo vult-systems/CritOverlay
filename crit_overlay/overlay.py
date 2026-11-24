@@ -1,8 +1,8 @@
 import logging
+import os
 import subprocess
 import time
 from datetime import datetime
-from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRect, QSize, Qt, QTimer, Signal, QEvent
 from PySide6.QtGui import (
@@ -13,7 +13,7 @@ from PySide6.QtGui import (
     QKeySequence,
     QPainter,
     QPen,
-    QPixmap,
+    QInputDevice,
     QPointingDevice,
 )
 from PySide6.QtWidgets import (
@@ -28,8 +28,11 @@ from PySide6.QtWidgets import (
 )
 
 from . import brush
+from . import compat
 from . import constants as C
 from . import icons
+from . import native_windows
+from . import paths
 from .color_popup import ColorPopup
 from .config import AppConfig
 from .models import History, Stroke
@@ -39,12 +42,46 @@ from .pass_through_badge import PassThroughBadge
 logger = logging.getLogger(f"{C.ORG_NAME}.overlay")
 
 
+# Above this many device pixels the canvas falls back to 1x resolution
+# instead of matching the monitor's scale. Only reachable with
+# --screens all across scaled monitors; one 4K monitor at 200% is ~8M.
+_MAX_CANVAS_DEVICE_PIXELS = 48_000_000
+
+# Consecutive pen contact events reporting exactly zero pressure before a
+# device is treated as having no pressure sensor. Some drivers (and pen
+# input forwarded over Remote Desktop) report 0 for the whole stroke, which
+# would otherwise draw every line at minimum width.
+_ZERO_PRESSURE_EVENTS = 6
+
+
 class Overlay(QWidget):
     status_changed = Signal(str)
 
-    def __init__(self):
+    def __init__(self, screen_mode="cursor", input_mode="auto", screenshot_dir=None):
         super().__init__()
         logger.debug("Overlay init start")
+
+        self._requested_screen_mode = screen_mode
+        self._target_screen = None
+        self._target_lost = False
+        self._user_chose_screen = False
+        self._screen_count = len(QGuiApplication.screens())
+        # Display changes arrive in bursts (a projector plugging in fires
+        # screenAdded, several geometryChanged and a primaryScreenChanged).
+        # Handle the burst once, after it settles.
+        self._screen_change_timer = QTimer(self)
+        self._screen_change_timer.setSingleShot(True)
+        self._screen_change_timer.timeout.connect(self._apply_screen_change)
+        self._alignment_timer = QTimer(self)
+        self._alignment_timer.setSingleShot(True)
+        self._alignment_timer.timeout.connect(self._check_alignment)
+        self._alignment_retries = 0
+        self._input_mode = input_mode
+        self._screenshot_dir_override = screenshot_dir
+        self._last_good_screenshot_dir = None
+        self._no_pressure_devices = set()
+        self._zero_pressure_run = 0
+        self._click_through_native_ok = None
 
         self._config = AppConfig()
         saved = self._config.load()
@@ -94,12 +131,21 @@ class Overlay(QWidget):
         self._settings_save_timer.timeout.connect(self._flush_settings)
 
         self._canvas = None
+        self._select_monitor()
+        n, total = self._monitor_position()
+        logger.info(
+            "Covering monitor %s (%d of %d, start mode %s)",
+            self._target_screen.name() if self._target_screen else "?", n, total, self._requested_screen_mode,
+        )
         self._update_geometry()
         self._rebuild_canvas()
 
         app = QGuiApplication.instance()
-        app.screenAdded.connect(self._on_screens_changed)
-        app.screenRemoved.connect(self._on_screens_changed)
+        app.screenAdded.connect(self._on_screen_added)
+        app.screenRemoved.connect(self._on_screen_removed)
+        app.primaryScreenChanged.connect(self._on_screens_changed)
+        for screen in QGuiApplication.screens():
+            self._watch_screen(screen)
 
         self.hover_tip = QLabel("", self)
         self.hover_tip.setStyleSheet(C.TOAST_STYLE)
@@ -116,6 +162,7 @@ class Overlay(QWidget):
 
         self._color_popup = None
         self.panel = self._build_panel()
+        self._refresh_monitor_button()
         self.panel.adjustSize()
         self._refresh_history_buttons()
 
@@ -125,7 +172,7 @@ class Overlay(QWidget):
         self._toast_timer = QTimer(self)
         self._toast_timer.setSingleShot(True)
         self._toast_timer.timeout.connect(self.toast_label.hide)
-        self._toast_anchor = (self._primary_local_rect(), C.PANEL_MARGIN_TOP)
+        self._toast_anchor = (self._anchor_local_rect(), C.PANEL_MARGIN_TOP)
 
         self._place_chrome()
 
@@ -138,24 +185,225 @@ class Overlay(QWidget):
         self.status_changed.connect(self._toast)
         self._install_shortcuts()
 
-        self._toast("B Brush • E Eraser • F8 Pass-through • F9 Snapshot", ms=C.STARTUP_HINT_MS)
+        hint = "B Brush • E Eraser • F8 Pass-through • F9 Snapshot"
+        if len(QGuiApplication.screens()) > 1:
+            hint += " • F7 Next monitor"
+        self._toast(hint, ms=C.STARTUP_HINT_MS)
 
         logger.debug("Overlay init complete")
 
-    # -- geometry -----------------------------------------------------
+    # -- monitors -------------------------------------------------------
+    #
+    # The overlay is one window covering exactly one monitor, on every
+    # display configuration (see compat.choose_monitor for why spanning
+    # monitors can't be made accurate). F7, the toolbar's monitor button or
+    # the tray move it to the next monitor. Annotations stay in the window,
+    # so they move with it.
+
+    def _ordered_screens(self):
+        return sorted(QGuiApplication.screens(), key=lambda s: (s.geometry().x(), s.geometry().y()))
+
+    def _monitor_position(self, screen=None):
+        """(1-based position left to right, total), or (0, total)."""
+        screen = screen or self._target_screen
+        ordered = self._ordered_screens()
+        n = next((i + 1 for i, s in enumerate(ordered) if s is screen), 0)
+        return n, len(ordered)
+
+    def _select_monitor(self, previous_lost=False):
+        target = compat.choose_monitor(
+            QGuiApplication.screens(),
+            QGuiApplication.primaryScreen(),
+            QGuiApplication.screenAt(QCursor.pos()),
+            self._requested_screen_mode,
+            previous=self._target_screen,
+            previous_lost=previous_lost,
+            user_chose=self._user_chose_screen,
+        )
+        if previous_lost:
+            self._user_chose_screen = False
+        changed = target is not self._target_screen
+        self._target_screen = target
+        return changed
+
+    def _apply_geometry(self):
+        target = self._target_screen or QGuiApplication.primaryScreen()
+        if target is None:
+            # No monitors at all, e.g. briefly while a docking station
+            # reconnects. The next screenAdded puts us back.
+            logger.warning("No monitors reported; leaving the overlay where it is")
+            return
+        # Tell Qt which monitor this window belongs to before moving it, so
+        # it picks up that monitor's scale factor instead of the one it was
+        # last on.
+        handle = self.windowHandle()
+        if handle is not None:
+            handle.setScreen(target)
+        elif hasattr(self, "setScreen"):
+            self.setScreen(target)
+        self.setGeometry(target.geometry())
+        # The resize above can rebuild the canvas before the new monitor's
+        # scale has reached the widget; match it now rather than on the
+        # next paint.
+        if self._canvas is not None and abs(self._canvas.devicePixelRatio() - self._target_dpr()) > 1e-3:
+            self._rebuild_canvas()
 
     def _update_geometry(self):
-        screens = QGuiApplication.screens()
-        geo = screens[0].geometry()
-        for s in screens[1:]:
-            geo = geo.united(s.geometry())
-        logger.debug("Virtual desktop geometry: %s", geo)
-        self.setGeometry(geo)
+        self._apply_geometry()
+        self._alignment_retries = 1
+        self._alignment_timer.start(250)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._alignment_retries = 1
+        self._alignment_timer.start(250)
+
+    def _check_alignment(self):
+        """Compare where Windows actually put the window with where it
+        should be. Moving between monitors of different scale goes through
+        a WM_DPICHANGED round trip that can, rarely, leave the window sized
+        for the old scale; one re-apply fixes that."""
+        if not self.isVisible():
+            return
+        try:
+            ok, actual, expected = self.native_geometry_ok()
+        except Exception:
+            logger.exception("Couldn't check native overlay geometry")
+            return
+        if ok is None:
+            return
+        if ok:
+            logger.info("Overlay native rect %s matches the monitor", actual)
+            return
+        if self._alignment_retries > 0:
+            self._alignment_retries -= 1
+            logger.info("Overlay native rect %s, expected %s; re-applying geometry", actual, expected)
+            # Natively, not via setGeometry: when Qt's cached geometry
+            # already equals the target (it hasn't caught up with what
+            # Windows did), setGeometry is a no-op. Qt syncs from the
+            # resulting window messages.
+            if not native_windows.set_window_rect(int(self.winId()), expected):
+                self._apply_geometry()
+            self._alignment_timer.start(250)
+            return
+        logger.warning(
+            "Overlay native rect %s differs from expected %s. Drawing may be offset from the "
+            "screen; press F7 to move monitors, or see TROUBLESHOOTING.md", actual, expected,
+        )
+
+    def log_native_geometry(self):
+        # Kept for callers outside this class; same as an immediate check.
+        self._check_alignment()
+
+    def _watch_screen(self, screen):
+        # A display-scale or resolution change in Settings while running
+        # changes geometry without adding or removing a screen.
+        screen.geometryChanged.connect(self._on_screens_changed)
+        screen.logicalDotsPerInchChanged.connect(self._on_screens_changed)
+
+    def _on_screen_added(self, screen):
+        logger.info("Monitor connected: %s", screen.name())
+        self._watch_screen(screen)
+        self._screen_change_timer.start(200)
+
+    def _on_screen_removed(self, screen):
+        logger.info("Monitor disconnected: %s", screen.name())
+        if screen is self._target_screen:
+            # Drop the reference now: Qt deletes this QScreen right after
+            # the signal, and touching it later would raise.
+            self._target_screen = None
+            self._target_lost = True
+        self._screen_change_timer.start(200)
 
     def _on_screens_changed(self, *_args):
-        logger.info("Screen configuration changed; recomputing overlay geometry")
+        self._screen_change_timer.start(200)
+
+    def _apply_screen_change(self):
+        lost, self._target_lost = self._target_lost, False
+        before_count, self._screen_count = self._screen_count, len(QGuiApplication.screens())
+        self._select_monitor(previous_lost=lost)
+        n, total = self._monitor_position()
+        logger.info(
+            "Display configuration changed: %d monitor(s), covering %s (%d of %d)",
+            total, self._target_screen.name() if self._target_screen else "none", n, total,
+        )
         self._update_geometry()
+        self._refresh_monitor_button()
         self._place_chrome()
+        if lost:
+            self.status_changed.emit(f"Monitor disconnected. Now on monitor {n} of {total}")
+        elif total > before_count:
+            self.status_changed.emit(f"Monitor connected. F7 switches monitors ({n} of {total})")
+
+    def move_to_next_screen(self):
+        target = compat.next_monitor(self._ordered_screens(), self._target_screen)
+        if target is None:
+            self.status_changed.emit("Only one monitor connected")
+            return
+        if self.current is not None:
+            # Don't carry a half-drawn stroke across monitors.
+            self._end_stroke()
+        self._target_screen = target
+        # Stay on the chosen monitor across display changes, even with
+        # --screens primary.
+        self._user_chose_screen = True
+        n, total = self._monitor_position()
+        logger.info("Moving overlay to %s (%d of %d)", target.name(), n, total)
+        self._update_geometry()
+        self._refresh_monitor_button()
+        self._place_chrome()
+        if self.pass_through:
+            self._pass_through_badge.show()
+            self._pass_through_badge.raise_()
+        else:
+            self.raise_()
+            self.activateWindow()
+        self.status_changed.emit(f"Monitor {n} of {total}")
+
+    def _refresh_monitor_button(self):
+        if not hasattr(self, "monitor_btn"):
+            return
+        n, total = self._monitor_position()
+        self.monitor_btn.setVisible(total > 1)
+        self.monitor_btn.setToolTip(f"Next monitor (F7). On {n} of {total}")
+        self.panel.adjustSize()
+
+    def expected_native_rect(self):
+        """Where the window should be in physical pixels. Qt keeps each
+        monitor's physical top-left as its logical origin and scales only
+        the size, which is what makes this computable from QScreen."""
+        s = self._target_screen or QGuiApplication.primaryScreen()
+        g, dpr = s.geometry(), s.devicePixelRatio()
+        return (g.x(), g.y(), g.x() + round(g.width() * dpr), g.y() + round(g.height() * dpr))
+
+    def native_geometry_ok(self, tolerance=3):
+        actual = native_windows.window_rect(int(self.winId()))
+        expected = self.expected_native_rect()
+        if actual is None:
+            return None, actual, expected
+        ok = all(abs(a - e) <= tolerance for a, e in zip(actual, expected))
+        return ok, actual, expected
+
+    def diagnostic_lines(self):
+        n, total = self._monitor_position()
+        covers = self._target_screen.name() if self._target_screen else "none"
+        lines = [
+            f"Overlay covers: {covers} (monitor {n} of {total}; start mode {self._requested_screen_mode}"
+            f"{'; moved by user' if self._user_chose_screen else ''}), logical {self.geometry().getRect()}",
+            f"Overlay input mode: {self._input_mode}",
+        ]
+        if self._canvas is not None:
+            null_note = " (NULL, allocation failed)" if self._canvas.isNull() else ""
+            lines.append(
+                f"Canvas: {self._canvas.width()}x{self._canvas.height()} device px "
+                f"at {self._canvas.devicePixelRatio():g}x{null_note}"
+            )
+        if self.isVisible():
+            ok, actual, expected = self.native_geometry_ok()
+            lines.append(f"Native window rect: {actual}, expected {expected}, ok={ok}")
+        if self._no_pressure_devices:
+            lines.append(f"Pen devices treated as pressure-less: {sorted(self._no_pressure_devices)}")
+        return lines
 
     def resizeEvent(self, event):
         # Guarded because Qt can fire an initial resizeEvent from within
@@ -165,15 +413,15 @@ class Overlay(QWidget):
             self._rebuild_canvas()
         super().resizeEvent(event)
 
-    def _primary_local_rect(self):
-        # Toolbar/toast are docked to the primary monitor, not centered
-        # across the full multi-monitor virtual desktop (which could place
-        # them in the gap between two screens).
-        primary = QGuiApplication.primaryScreen().geometry()
-        return primary.translated(-self.geometry().topLeft())
+    def _anchor_screen(self):
+        # The monitor the toolbar, toast and pass-through badge dock to.
+        return self._target_screen or QGuiApplication.primaryScreen()
+
+    def _anchor_local_rect(self):
+        return self._anchor_screen().geometry().translated(-self.geometry().topLeft())
 
     def _place_chrome(self):
-        local = self._primary_local_rect()
+        local = self._anchor_local_rect()
         panel_x = local.x() + max(16, (local.width() - self.panel.width()) // 2)
         panel_y = local.y() + C.PANEL_MARGIN_TOP
         self.panel.move(panel_x, panel_y)
@@ -187,10 +435,10 @@ class Overlay(QWidget):
         # A separate top-level window, so this uses global screen
         # coordinates directly rather than the overlay-local coordinates
         # _place_chrome's other targets use.
-        primary = QGuiApplication.primaryScreen().geometry()
+        anchor = self._anchor_screen().geometry()
         badge = self._pass_through_badge
-        x = primary.x() + max(16, (primary.width() - badge.width()) // 2)
-        y = primary.y() + C.PANEL_MARGIN_TOP
+        x = anchor.x() + max(16, (anchor.width() - badge.width()) // 2)
+        y = anchor.y() + C.PANEL_MARGIN_TOP
         badge.move(x, y)
 
     def _position_toast(self):
@@ -350,6 +598,8 @@ class Overlay(QWidget):
 
         sep()
 
+        self.monitor_btn = tool_button("monitor", "Next monitor (F7)")
+        self.monitor_btn.clicked.connect(self.move_to_next_screen)
         self.pass_btn = tool_button("pass_through", "Pass-through (F8)", checkable=True)
         self.snap_btn = tool_button("snapshot", "Screenshot (F9)")
         self.exit_btn = tool_button("exit", "Exit (Esc)")
@@ -373,6 +623,7 @@ class Overlay(QWidget):
         add("I", self._toggle_eyedropper)
         add("Ctrl+Z", self.undo)
         add("Ctrl+Shift+Z", self.redo)
+        add("F7", self.move_to_next_screen)
         add("F8", self.toggle_pass_through)
         add("F9", self.capture_annotated)
         add("[", lambda: self.change_size(-1))
@@ -561,9 +812,22 @@ class Overlay(QWidget):
         # The Qt attribute above doesn't reach the native WS_EX_TRANSPARENT
         # style for this window's flags, so clicks keep landing here. Set
         # the native style directly. See native_windows.py.
-        set_click_through(int(self.winId()), self.pass_through)
+        ok = set_click_through(int(self.winId()), self.pass_through)
+        if not ok and self._click_through_native_ok is not False:
+            logger.warning("Couldn't set native click-through; relying on Qt's attribute only")
+        self._click_through_native_ok = ok
         self.panel.setVisible(not self.pass_through)
         self.pass_btn.setChecked(self.pass_through)
+        focus = QApplication.focusWindow()
+        # One line per transition, so a report of "toolbar stopped
+        # responding" (#3) comes with the click-through state in the log.
+        logger.info(
+            "Pass-through %s: Qt transparent=%s, native WS_EX_TRANSPARENT=%s, focus=%s",
+            "on" if self.pass_through else "off",
+            self.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents),
+            bool(native_windows.get_ex_style(int(self.winId())) & native_windows.WS_EX_TRANSPARENT),
+            focus.objectName() or type(focus).__name__ if focus is not None else None,
+        )
 
         if self.pass_through:
             self.status_changed.emit("Pass-through ON. Click the badge or F8 to return")
@@ -686,16 +950,17 @@ class Overlay(QWidget):
         # instead of being (wrongly) treated as the start of the stroke.
         extra_before = points[start - 1][0] if start > 0 else None
         segments = brush.segments_for_points(window, stroke.size, extra_before=extra_before)
-        layer = brush.render_stroke_layer(stroke, segments)
+        dpr = self._canvas_dpr()
+        layer = brush.render_stroke_layer(stroke, segments, dpr)
         if layer is None:
             return
         new_pixmap, new_origin = layer
-        new_rect = QRect(new_origin, new_pixmap.size())
+        new_rect = brush.logical_rect(new_origin, new_pixmap)
 
         if self._live_layer is None:
             self._live_layer, self._live_layer_origin = new_pixmap, new_origin
         else:
-            old_rect = QRect(self._live_layer_origin, self._live_layer.size())
+            old_rect = brush.logical_rect(self._live_layer_origin, self._live_layer)
             if old_rect.contains(new_rect):
                 # Fits in the existing buffer, so draw in place. The buffer
                 # is always alpha=255 internally and opacity is applied once
@@ -708,8 +973,7 @@ class Overlay(QWidget):
                     painter.end()
             else:
                 union = old_rect.united(new_rect)
-                merged = QPixmap(union.size())
-                merged.fill(Qt.GlobalColor.transparent)
+                merged = brush.new_layer(union.size(), dpr)
                 painter = QPainter(merged)
                 try:
                     painter.drawPixmap(old_rect.topLeft() - union.topLeft(), self._live_layer)
@@ -760,15 +1024,58 @@ class Overlay(QWidget):
         return QPointF(gp.x() - geo.x(), gp.y() - geo.y())
 
     def tabletEvent(self, event):
+        if self._input_mode == "mouse":
+            # Mouse-only fallback for misbehaving tablet drivers. Ignoring
+            # the tablet event makes Qt deliver it again as an ordinary
+            # synthesized mouse event, which the mouse handlers draw with
+            # (no pressure, but speed still varies the width).
+            event.ignore()
+            return
         try:
             self._handle_tablet_event(event)
         except Exception:
             logger.exception("Error handling tablet event")
             event.accept()
 
+    def _device_key(self, event):
+        try:
+            dev = event.pointingDevice()
+            return f"{dev.name()}#{dev.uniqueId().numericId()}" if dev is not None else "unknown"
+        except Exception:
+            return "unknown"
+
+    def _tablet_pressure(self, event):
+        """Pen pressure in 0..1, or the mouse default for devices without a
+        working pressure sensor."""
+        raw = float(event.pressure())
+        key = self._device_key(event)
+        if key in self._no_pressure_devices:
+            return C.DEFAULT_PRESSURE
+        dev = event.pointingDevice()
+        if dev is not None and not (dev.capabilities() & QInputDevice.Capability.Pressure):
+            self._mark_no_pressure(key, "driver reports no pressure capability")
+            return C.DEFAULT_PRESSURE
+        if event.type() == QEvent.Type.TabletPress:
+            self._zero_pressure_run = 0
+        if self._tablet_contact or event.type() == QEvent.Type.TabletPress:
+            if raw <= 0.0:
+                self._zero_pressure_run += 1
+                if self._zero_pressure_run >= _ZERO_PRESSURE_EVENTS:
+                    self._mark_no_pressure(key, "pressure stayed at 0 while drawing")
+                    return C.DEFAULT_PRESSURE
+            else:
+                self._zero_pressure_run = 0
+        return max(0.01, raw)
+
+    def _mark_no_pressure(self, key, why):
+        if key not in self._no_pressure_devices:
+            self._no_pressure_devices.add(key)
+            logger.warning("Pen %s: %s; drawing with default pressure. If this tablet normally has "
+                           "pressure, enable Windows Ink for this app in the tablet driver settings.", key, why)
+
     def _handle_tablet_event(self, event):
         event_type = event.type()
-        pressure = max(0.01, float(event.pressure()))
+        pressure = self._tablet_pressure(event)
         pos = self._overlay_pos(event)
         is_eraser_tip = event.pointerType() == QPointingDevice.PointerType.Eraser
 
@@ -909,7 +1216,7 @@ class Overlay(QWidget):
         # Flatten the stroke to an opaque offscreen layer, then blend that
         # onto the target once at stroke.opacity. Blending each segment
         # separately would double up wherever the stroke overlaps itself.
-        layer = brush.render_stroke_layer(stroke, segments)
+        layer = brush.render_stroke_layer(stroke, segments, self._canvas_dpr())
         if layer is None:
             return
         pixmap, origin = layer
@@ -955,11 +1262,17 @@ class Overlay(QWidget):
         # every paintEvent. Undo/redo/clear/resize replace the stroke set
         # and rebuild; a new stroke just paints on top.
         #
-        # Holds strokes only. Filled transparent explicitly because
-        # QPixmap(size) can come back in the screen's opaque format, which
-        # turns the eraser's CompositionMode_Clear into a no-op.
-        self._canvas = QPixmap(self.size())
-        self._canvas.fill(Qt.GlobalColor.transparent)
+        # Holds strokes only, at the monitor's pixel density (see
+        # _target_dpr), transparent so the eraser's CompositionMode_Clear
+        # works.
+        dpr = self._target_dpr()
+        canvas = brush.new_layer(self.size(), dpr)
+        if canvas.isNull() and dpr > 1.0:
+            logger.warning("Couldn't allocate a %gx canvas for %s; falling back to 1x", dpr, self.size())
+            canvas = brush.new_layer(self.size(), 1.0)
+        if canvas.isNull():
+            logger.error("Couldn't allocate the drawing canvas (%s). Try --screens primary.", self.size())
+        self._canvas = canvas
         painter = QPainter(self._canvas)
         try:
             for stroke in self.history:
@@ -967,7 +1280,22 @@ class Overlay(QWidget):
         finally:
             painter.end()
 
+    def _target_dpr(self):
+        """Pixel density for the canvas: the monitor's scale factor, unless
+        that would make the canvas unreasonably large."""
+        dpr = max(1.0, float(self.devicePixelRatioF()))
+        size = self.size()
+        if size.width() * size.height() * dpr * dpr > _MAX_CANVAS_DEVICE_PIXELS:
+            return 1.0
+        return dpr
+
+    def _canvas_dpr(self):
+        return self._canvas.devicePixelRatio() if self._canvas is not None else self._target_dpr()
+
     def paintEvent(self, event):
+        if self._canvas is not None and abs(self._canvas.devicePixelRatio() - self._target_dpr()) > 1e-3:
+            # Moved to a monitor with a different scale.
+            self._rebuild_canvas()
         painter = QPainter(self)
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -985,8 +1313,7 @@ class Overlay(QWidget):
                 # scoped to the dirty rect, then draw that over the
                 # backdrop.
                 dirty = event.rect()
-                temp = QPixmap(dirty.size())
-                temp.fill(Qt.GlobalColor.transparent)
+                temp = brush.new_layer(dirty.size(), self._canvas_dpr())
                 tp = QPainter(temp)
                 try:
                     tp.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -1053,15 +1380,20 @@ class Overlay(QWidget):
         try:
             screen = self._active_screen(cursor_pos)
             pixmap = screen.grabWindow(0)
-            folder = Path.home() / "Pictures" / C.ORG_NAME
-            folder.mkdir(parents=True, exist_ok=True)
-            out = folder / f"crit_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-            if pixmap.save(str(out), "PNG"):
+            if pixmap.isNull():
+                logger.error("Screen grab returned nothing for %s", screen.name())
+                self.status_changed.emit("Screenshot failed, see log")
+                return
+            out = self._save_screenshot(pixmap, f"crit_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+            if out is not None:
                 logger.info("Saved screenshot to %s", out)
-                self.status_changed.emit(f"Saved {out.name}")
+                preferred = paths.current().screenshot_dir_candidates(self._screenshot_dir_override)[0]
+                if out.parent == preferred:
+                    self.status_changed.emit(f"Saved {out.name}")
+                else:
+                    self.status_changed.emit(f"Saved to {out.parent}")
                 self._reveal_in_explorer(out)
             else:
-                logger.error("Failed to save screenshot to %s", out)
                 self.status_changed.emit("Screenshot failed, see log")
         except Exception:
             logger.exception("Error finishing screenshot capture")
@@ -1074,11 +1406,40 @@ class Overlay(QWidget):
                 self.toast_label.show()
             self.update()
 
+    def _save_screenshot(self, pixmap, name):
+        """Try each candidate folder in turn (Pictures first). On managed
+        machines Pictures may be redirected to an unavailable share or
+        blocked by Controlled Folder Access; a write that fails there falls
+        through to %LOCALAPPDATA% and then %TEMP%. The folder that worked is
+        tried first next time, so a blocked one doesn't raise a Defender
+        notification on every screenshot."""
+        candidates = paths.current().screenshot_dir_candidates(self._screenshot_dir_override)
+        if self._last_good_screenshot_dir in candidates:
+            candidates.remove(self._last_good_screenshot_dir)
+            candidates.insert(0, self._last_good_screenshot_dir)
+        for folder in candidates:
+            try:
+                folder.mkdir(parents=True, exist_ok=True)
+            except Exception as exc:
+                logger.warning("Can't use screenshot folder %s: %s", folder, exc)
+                continue
+            out = folder / name
+            if pixmap.save(str(out), "PNG"):
+                self._last_good_screenshot_dir = folder
+                return out
+            logger.warning(
+                "Couldn't write %s (folder redirected/offline, read-only, or blocked by "
+                "Controlled Folder Access); trying the next location", out,
+            )
+        logger.error("No screenshot location was writable. Tried: %s", [str(c) for c in candidates])
+        return None
+
     def _reveal_in_explorer(self, path):
+        explorer = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "explorer.exe")
         try:
-            subprocess.Popen(["explorer", f"/select,{path}"])
+            subprocess.Popen([explorer, f"/select,{path}"])
         except Exception:
-            logger.exception("Failed to open Explorer for %s", path)
+            logger.warning("Couldn't open Explorer for %s (blocked by policy?)", path, exc_info=True)
 
     # -- lifecycle -----------------------------------------------------------
 

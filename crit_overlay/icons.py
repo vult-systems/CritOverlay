@@ -210,6 +210,19 @@ def eyedropper_glyph(painter, color, size):
     painter.drawEllipse(QPointF(size * 0.22, size * 0.90), size * 0.045, size * 0.045)
 
 
+def monitor_glyph(painter, color, size):
+    # A display on a stand, with an arrow: "move to the next monitor".
+    pen = _stroke_pen(color, size * 0.08)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawRoundedRect(QRectF(size * 0.12, size * 0.18, size * 0.76, size * 0.50), size * 0.06, size * 0.06)
+    painter.drawLine(QPointF(size * 0.50, size * 0.68), QPointF(size * 0.50, size * 0.80))
+    painter.drawLine(QPointF(size * 0.34, size * 0.82), QPointF(size * 0.66, size * 0.82))
+    painter.drawLine(QPointF(size * 0.32, size * 0.43), QPointF(size * 0.64, size * 0.43))
+    painter.drawLine(QPointF(size * 0.54, size * 0.33), QPointF(size * 0.65, size * 0.43))
+    painter.drawLine(QPointF(size * 0.54, size * 0.53), QPointF(size * 0.65, size * 0.43))
+
+
 _GLYPHS = {
     "brush": brush_glyph,
     "eraser": eraser_glyph,
@@ -222,6 +235,7 @@ _GLYPHS = {
     "more": more_glyph,
     "backdrop_off": backdrop_off_glyph,
     "eyedropper": eyedropper_glyph,
+    "monitor": monitor_glyph,
 }
 
 

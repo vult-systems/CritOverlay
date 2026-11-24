@@ -12,9 +12,16 @@ to 0, which is idempotent, so overlaps never build up.
 
 smoothed_path() resamples the raw points through a Catmull-Rom spline, since
 straight lines between sampled points facet on fast curves.
+
+Layers are allocated at the monitor's device pixel ratio (new_layer), so on
+a 150% or 200% display strokes render at full physical resolution instead of
+being drawn at 100% and upscaled. All coordinates stay logical; QPainter
+applies the ratio.
 """
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+import math
+
+from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 
 CATMULL_ROM_SAMPLES = 6
@@ -127,6 +134,27 @@ def paint_segments(painter, segments, color):
         painter.drawLine(p0, p1)
 
 
+def new_layer(logical_size, dpr=1.0):
+    """Transparent pixmap covering logical_size at device pixel ratio dpr.
+
+    Filled transparent explicitly because QPixmap(size) can come back in the
+    screen's opaque format, which turns CompositionMode_Clear into a no-op.
+    """
+    dpr = max(1.0, float(dpr))
+    w = max(1, math.ceil(logical_size.width() * dpr))
+    h = max(1, math.ceil(logical_size.height() * dpr))
+    pixmap = QPixmap(w, h)
+    pixmap.setDevicePixelRatio(dpr)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    return pixmap
+
+
+def logical_rect(origin, pixmap):
+    """The logical-coordinate rect a layer covers when drawn at origin."""
+    dpr = pixmap.devicePixelRatio() or 1.0
+    return QRect(origin, QSize(math.ceil(pixmap.width() / dpr), math.ceil(pixmap.height() / dpr)))
+
+
 def _segment_bounds(segments, margin=3.0):
     xs = [p.x() for p, _ in segments]
     ys = [p.y() for p, _ in segments]
@@ -135,7 +163,7 @@ def _segment_bounds(segments, margin=3.0):
     return rect.toAlignedRect()
 
 
-def render_stroke_layer(stroke, segments):
+def render_stroke_layer(stroke, segments, dpr=1.0):
     """Flattens a non-eraser stroke onto an opaque offscreen pixmap sized to
     its bounding box. Returns (pixmap, origin) to composite at, or None if
     there is nothing to draw. The caller applies stroke.opacity once when
@@ -146,8 +174,7 @@ def render_stroke_layer(stroke, segments):
     if bounds.width() <= 0 or bounds.height() <= 0:
         return None
 
-    layer = QPixmap(bounds.size())
-    layer.fill(Qt.GlobalColor.transparent)
+    layer = new_layer(bounds.size(), dpr)
     painter = QPainter(layer)
     try:
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
