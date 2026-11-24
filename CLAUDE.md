@@ -87,5 +87,5 @@ Full procedure: `docs/BUILDING.md#releasing`.
 
 ## Current state
 
-- **Releases:** v1.4.2 is the stable release. v1.5.0-rc.1 is a pre-release (built locally, before CI existed), pending acceptance in #4.
+- **Releases:** v1.4.2 is the stable release. v1.5.0-rc.2 (the first CI-built release) is the current pre-release, pending acceptance in #4. It supersedes v1.5.0-rc.1, which was built locally before CI existed.
 - **#7:** stays open until the first tag-driven draft release succeeds.

@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## v1.5.0-rc.2 (pre-release)
+
+Second release candidate for v1.5.0. It adds the drawing region and the
+first CI-built release; everything listed under v1.5.0-rc.1 also applies.
+v1.4.2 stays the stable release until the acceptance checks in #4 pass.
 
 **Added**
 
