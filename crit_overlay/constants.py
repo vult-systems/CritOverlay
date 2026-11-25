@@ -43,6 +43,10 @@ DEFAULT_MARGIN_SIZE = 120
 DEFAULT_MARGIN_COLOR = "white"  # "white" | "black"
 DEFAULT_MARGIN_OPACITY = 1.0
 
+# Global show/hide hotkey (hotkeys.py). Configurable as [compat] hotkey or
+# --hotkey; "none" turns it off.
+DEFAULT_HOTKEY = "Ctrl+Alt+D"
+
 # Past this many strokes the oldest is dropped, so a long session doesn't
 # grow memory without limit.
 MAX_STROKE_HISTORY = 300
