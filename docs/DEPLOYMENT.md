@@ -125,6 +125,18 @@ Command-line flags (for shortcuts): `--safe-mode`, `--input mouse`,
 `--diagnose`, `--selftest`, `--no-dialogs`. `CritOverlay-console.exe --help`
 lists them.
 
+### Hotkey and Start with Windows
+
+- The global show/hide hotkey defaults to Ctrl+Alt+D. If the lab image
+  uses that combination for something else, set `hotkey = ...` (or
+  `none`) in the machine-wide `[compat]` below.
+- Start with Windows is per user and off by default. It writes only a
+  shortcut to the user's Startup folder (`shell:startup`), never the
+  registry, and points at the copy that enabled it. Mandatory or reset
+  profiles lose it at logoff, like other per-user settings.
+- One copy runs per logon session (users on a shared or remote-desktop
+  machine each get their own).
+
 ## Portable / USB use
 
 Set `portable = true` in `CritOverlay.ini` (or pass `--portable`). Settings,

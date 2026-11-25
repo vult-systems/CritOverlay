@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+**Changed**
+
+- **Esc hides the overlay to the tray instead of exiting; Exit is in the
+  tray menu** (#14). Esc already left the process running in the tray in
+  every earlier version, because the overlay is a `Qt::Tool` window and
+  closing it never counted as the last window closing, while the README
+  said Esc exits. Hiding now keeps strokes, undo history, region, margin,
+  backdrop and pass-through, flushes settings, stops all timers and trims
+  the working set. The toolbar's last button and Alt+F4 hide too. Without a
+  tray icon, Esc still exits. `quitOnLastWindowClosed` is off, so closing a
+  dialog while hidden can't end the app.
+
+**Added**
+
+- **Ctrl+Alt+D shows/hides the overlay from any app** (#14), via
+  `RegisterHotKey` and a Qt native event filter (no new dependencies).
+  Configurable as `[compat] hotkey` / `--hotkey`; `none` turns it off. A
+  combination owned by another program is reported in a tray notification
+  and the log; the app still starts.
+- **One copy per session** (#14). A named mutex is checked before Qt loads;
+  a second launch exits in about 0.1 s and brings the running copy's
+  overlay to the front.
+- **Start with Windows** in the tray menu, off by default (#14): a Startup
+  folder shortcut that runs the app with the new `--hidden` flag. No
+  registry writes.
+- `--selftest` checks global hotkey delivery and that hide/show keeps
+  strokes, region and placement.
+
 ## v1.5.0-rc.3 (pre-release)
 
 Third release candidate for v1.5.0: fixes the annotation margin from rc.2.

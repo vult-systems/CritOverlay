@@ -24,6 +24,10 @@ screens = cursor
 ; true: mouse input, starting on the primary monitor.
 safe_mode = false
 
+; Global hotkey that shows/hides the overlay from any app. Needs Ctrl, Alt
+; or Win, e.g. Ctrl+Shift+F10. none turns it off.
+hotkey = Ctrl+Alt+D
+
 ; Save screenshots here first (environment variables allowed). Leave empty
 ; for Pictures\CritOverlay.
 screenshot_dir =

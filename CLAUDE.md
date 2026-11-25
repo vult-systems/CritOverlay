@@ -35,6 +35,7 @@ Don't change these without an issue that discusses the trade-off:
 - **Pens through Windows Ink only.** Qt 6.8 removed Wintab. `--input mouse` is the fallback.
 - **Portable and self-contained.** Standard user, no installer, no registry writes, no network access, no runtimes to install. Onedir, not onefile, and no UPX.
 - **Startup fails loudly.** `launcher.py` stays stdlib-only, so errors before Qt loads still show a message, write a crash report and return a distinct exit code.
+- **Lives in the tray.** Esc hides; only the tray's Exit quits (Esc exits only when there's no tray). One copy per session. Start with Windows is a Startup-folder shortcut, not a registry value (#14).
 - **Settings carry over.** Bump `SETTINGS_VERSION` and add a migration in `config.py` rather than resetting user settings.
 
 ## Change discipline
@@ -88,4 +89,3 @@ Full procedure: `docs/BUILDING.md#releasing`.
 ## Current state
 
 - **Releases:** v1.4.2 is the stable release. v1.5.0-rc.3 is the current pre-release, pending acceptance in #4. It supersedes rc.2 (annotation margin fix, #13) and rc.1 (built locally before CI existed).
-- **#7:** stays open until the first tag-driven draft release succeeds.

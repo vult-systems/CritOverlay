@@ -40,6 +40,12 @@ Drawing region
   for notes. F9 then saves just that area. Esc cancels a selection; a plain
   click goes back to the full monitor.
 
+Hiding and quitting
+  Esc hides the overlay to the notification area (tray) and keeps your
+  drawing. Ctrl+Alt+D, from any app, or clicking the tray icon brings it
+  back. To quit, right-click the tray icon > Exit. Starting it again while
+  it runs just brings it back. Start with Windows is in the same menu.
+
 Files it writes
   Logs:        %LOCALAPPDATA%\CritOverlay\logs\
   Settings:    %APPDATA%\CritOverlay\Crit Overlay.ini
