@@ -92,6 +92,26 @@ exercises the toolbar and pass-through (see `crit_overlay/selftest.py`).
 | Region screenshot on Windows 10 | | Uses the same `QScreen.grabWindow` call as the existing full-monitor screenshot, with a sub-rectangle |
 | Building with Python 3.12 | | Lock installs (all wheels pure Python or abi3); only 3.13 actually built |
 
+## Known limitations (v1.5.0)
+
+v1.5.0 is feature-frozen at v1.5.0-rc.4 (see `CLAUDE.md`). These ship as
+they are; each is either by design or tracked for after v1.5.0 (#19).
+"From the code" means it follows from reading the code but hasn't been run.
+
+| Limitation | Effect and workaround | Tracking |
+|---|---|---|
+| One monitor at a time | By design: Qt can't place one window accurately across monitors with different scaling. F7, the toolbar's monitor button or the tray moves it. | [Why one monitor at a time](#why-one-monitor-at-a-time) |
+| Pens only through Windows Ink | With a Wacom driver's "Use Windows Ink" off, strokes have no pressure and the eraser tip isn't detected. Turn Windows Ink on for `CritOverlay.exe` in the driver's per-application settings. | #5 |
+| Unsigned executables | SmartScreen warns on downloaded copies; AppLocker/WDAC need a hash or path rule, redone for each release. | #6 |
+| Old settings pin defaults | Every exit (and now every hide to the tray) writes all brush and margin values, so changed defaults never reach anyone who has run the app before. | #1 |
+| Tray icon hidden on Windows 11 | New tray icons go to the hidden-icons overflow (^) until dragged onto the taskbar. Ctrl+Alt+D works either way. Seen on the test machine. | #19 |
+| Tray notifications can be suppressed | The "hotkey already in use" and "still running" notices are Windows notifications; with notifications or Do Not Disturb off, only the log records a hotkey conflict. The notices weren't seen on screen during testing. | #19 |
+| Upgrading while it runs | Starting a new version while an older copy is running only brings the old copy back. Exit from the tray first. From the code. | #19 |
+| Tray > Screenshot while hidden | Saves the monitor without the annotations, since the overlay isn't on screen. With a drawing region set, the region screenshot includes them. Show the overlay first. From the code; same as v1.4.2 for the full-monitor case. | #19 |
+| Hotkey while an elevated app has focus | Untested. Use the tray icon if Ctrl+Alt+D doesn't respond there. | #4 item 15 |
+| Startup watchdog exit code | A launch stopped by the watchdog exits with an arbitrary code (low byte 1). The next launch's message and `faulthandler.log` are what to go by. | #19 |
+| Python 3.9 source runs | Still work for old lab installs, but 3.9 gets no security fixes. The release build bundles 3.13. | #8 |
+
 ## Manual validation required before release
 
 The automated checks can't cover these. None are done for v1.5.0-rc.4

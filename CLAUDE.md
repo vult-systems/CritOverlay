@@ -87,6 +87,16 @@ Full procedure: `docs/BUILDING.md#releasing`.
    - Publish a stable release only after the manual acceptance checklist passes (`docs/COMPATIBILITY.md` > "Manual validation required before release", tracked as an issue). CI cannot substitute for it.
 5. Reproducible builds: the toolchain is hash-locked in `packaging/requirements-build.txt`; change it only via `packaging/update_lock.py`. Builds use Python 3.12–3.13 (`SUPPORTED_BUILD_PYTHONS`; CI pins `BUILD_PYTHON`).
 
+## Feature freeze: v1.5.0
+
+In effect from 2026-11-25 until v1.5.0 is tagged stable after #4 passes. The acceptance baseline is **v1.5.0-rc.4** (commit 7d0f363).
+
+- **Allowed:** fixes for confirmed bugs, regressions (against rc.4 or v1.4.2), compatibility failures, and release blockers. Each needs an issue with a reproduction and the `release-blocker` label or a reason it's needed now. Docs corrections are allowed.
+- **Not allowed:** new features or options, UI changes, refactoring, dependency or toolchain upgrades (#8). Non-blocking concerns get the `tech-debt` label (tracked in #19) instead of a change.
+- **Releases:** no new RC without a validated reason: a fix that was reproduced and then verified. Without one, v1.5.0 is rc.4's code with only the version and changelog changed. Never re-tag, re-upload or delete rc.4 or v1.4.2.
+- Fixes shipped in an RC whose check is pending in #4 have the `awaiting-acceptance` label and close when their #4 item passes.
+- Limitations shipping with v1.5.0 are listed in `docs/COMPATIBILITY.md#known-limitations-v150`.
+
 ## Current state
 
-- **Releases:** v1.4.2 is the stable release. v1.5.0-rc.4 is the current pre-release, pending acceptance in #4. It supersedes rc.3 (tray, hotkey, single instance, #14), rc.2 (annotation margin fix, #13) and rc.1 (built locally before CI existed).
+- **Releases:** v1.4.2 is the stable release. v1.5.0-rc.4 is the current pre-release and the frozen acceptance baseline, pending #4. It supersedes rc.3 (tray, hotkey, single instance, #14), rc.2 (annotation margin fix, #13) and rc.1 (built locally before CI existed).
