@@ -32,7 +32,8 @@ class TrayIcon(QSystemTrayIcon):
         menu.addSeparator()
         self.autostart_action = menu.addAction("Start with Windows")
         self.autostart_action.setCheckable(True)
-        self.autostart_action.triggered.connect(self.autostart_toggled.emit)
+        # Signal to signal: connecting to .emit would drop the checked state.
+        self.autostart_action.triggered.connect(self.autostart_toggled)
         troubleshooting = menu.addMenu("Troubleshooting")
         troubleshooting.addAction("Save Diagnostics Report").triggered.connect(self.diagnostics_requested.emit)
         troubleshooting.addAction("Open Log Folder").triggered.connect(self.open_logs_requested.emit)

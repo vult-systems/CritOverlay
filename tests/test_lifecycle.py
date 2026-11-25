@@ -192,6 +192,25 @@ class AutostartTests(unittest.TestCase):
         self.assertIn("--portable", autostart.launch_command(portable=True)[1])
 
 
+class TrayMenuTests(unittest.TestCase):
+    def test_start_with_windows_item_reports_its_new_state(self):
+        from PySide6.QtGui import QIcon
+
+        from crit_overlay.tray import TrayIcon
+
+        tray = TrayIcon(QIcon())
+        seen = []
+        tray.autostart_toggled.connect(seen.append)
+        self.assertFalse(tray.autostart_action.isChecked())
+        tray.autostart_action.trigger()
+        tray.autostart_action.trigger()
+        self.assertEqual(seen, [True, False])
+        tray.set_hotkey("Ctrl+Alt+D")
+        self.assertEqual(tray.show_hide_action.text(), "Show/Hide (Ctrl+Alt+D)")
+        tray.set_hotkey(None)
+        self.assertEqual(tray.show_hide_action.text(), "Show/Hide")
+
+
 class HideToTrayTests(unittest.TestCase):
     """The overlay is shown here (unlike the region tests): hiding is what's
     under test."""
