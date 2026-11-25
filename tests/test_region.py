@@ -301,17 +301,17 @@ class OverlayRegionTests(OverlayCase):
         self.assertIsNone(self.o.region)
         self.assertIn("full monitor", self.toasts[-1])
 
-    def test_escape_cancels_selection_instead_of_exiting(self):
+    def test_escape_cancels_selection_before_hiding(self):
         o = self.o
-        with mock.patch.object(o, "close") as close:
+        with mock.patch.object(o, "dismiss") as dismiss:
             o.begin_region_selection()
             self.mouse("press", 300, 300)
             o._escape()
-            close.assert_not_called()
+            dismiss.assert_not_called()
             self.assertFalse(o._selecting)
             self.assertIsNone(o.region)
             o._escape()
-            close.assert_called_once()
+            dismiss.assert_called_once()
 
     def test_selection_by_pen(self):
         o = self.o

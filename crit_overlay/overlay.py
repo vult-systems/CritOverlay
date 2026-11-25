@@ -58,6 +58,9 @@ _ZERO_PRESSURE_EVENTS = 6
 
 class Overlay(QWidget):
     status_changed = Signal(str)
+    # Emitted when Esc or the toolbar hides the overlay to the tray, so the
+    # tray can say once where it went.
+    hidden_to_tray = Signal()
 
     def __init__(self, screen_mode="cursor", input_mode="auto", screenshot_dir=None):
         super().__init__()
@@ -131,6 +134,10 @@ class Overlay(QWidget):
         self._selection_point = None
         self._capturing = False
         self._region_popup = None
+        # Set by app.py when there is a tray icon to come back from. Without
+        # one, Esc exits: a hidden overlay with no tray would be an
+        # invisible process nobody can reach (#14).
+        self._tray_available = False
 
         self.raw_pos = None
         self.lazy_pos = None
@@ -635,7 +642,7 @@ class Overlay(QWidget):
         self.exit_btn = tool_button("exit", "Exit (Esc)")
         self.pass_btn.clicked.connect(self.toggle_pass_through)
         self.snap_btn.clicked.connect(self.capture_annotated)
-        self.exit_btn.clicked.connect(self.close)
+        self.exit_btn.clicked.connect(self.dismiss)
 
         panel.adjustSize()
         return panel
@@ -677,6 +684,11 @@ class Overlay(QWidget):
         # flush that stutters the UI at that rate. In-memory state is
         # already current; only the write is deferred.
         self._settings_save_timer.start(300)
+
+    def save_settings_now(self):
+        """Write pending settings immediately (hide, quit)."""
+        self._settings_save_timer.stop()
+        self._flush_settings()
 
     def _flush_settings(self):
         self._config.save(
@@ -890,12 +902,12 @@ class Overlay(QWidget):
         self.update()
 
     def _escape(self):
-        # Esc cancels an area selection first; otherwise it exits as before.
+        # Esc cancels an area selection first; otherwise it hides the overlay.
         if self._selecting:
             self._cancel_selection_state()
             self.status_changed.emit("Selection cancelled")
         else:
-            self.close()
+            self.dismiss()
 
     def _selection_input(self, kind, pos):
         """Mouse or pen input while selecting an area. kind: press, move,
@@ -972,16 +984,80 @@ class Overlay(QWidget):
 
     # -- window / mode actions ---------------------------------------------
 
-    def toggle_visibility(self):
-        if self.isVisible():
-            self.hide()
+    def set_tray_available(self, available, hotkey_text=None):
+        """Called by app.py once the tray icon exists. Esc and the toolbar's
+        last button then hide to the tray instead of exiting."""
+        self._tray_available = bool(available)
+        if self._tray_available:
+            shows = f"{hotkey_text} or the tray icon" if hotkey_text else "the tray icon"
+            self.exit_btn.setIcon(icons.build_icon("hide"))
+            self.exit_btn.setToolTip(f"Hide (Esc). {shows} shows it again")
         else:
-            self.show()
+            self.exit_btn.setIcon(icons.build_icon("exit"))
+            self.exit_btn.setToolTip("Exit (Esc)")
+
+    def dismiss(self):
+        """Esc / toolbar: hide to the tray, or exit when there's no tray."""
+        if self._tray_available:
+            self.hide_to_tray()
+            self.hidden_to_tray.emit()
+        else:
+            logger.info("Exit requested from the overlay (no tray icon)")
+            QApplication.quit()
+
+    def hide_to_tray(self):
+        """Hide everything this window shows, keeping all state: strokes,
+        undo history, region, margin, backdrop and pass-through all come
+        back as they were. Nothing repaints or polls while hidden."""
+        if not self.isVisible():
+            return
+        if self._selecting:
+            self._cancel_selection_state()
+        if self.current is not None:
+            self._end_stroke()
+        for popup in (self._region_popup, self._color_popup):
+            if popup is not None and popup.isVisible():
+                popup.close()
+        self._pass_through_badge.hide()
+        self._hover_tip_timer.stop()
+        self.hover_tip.hide()
+        self._toast_timer.stop()
+        self.toast_label.hide()
+        self._alignment_timer.stop()
+        self.save_settings_now()
+        self.hide()
+        # After the hide has been processed, so the window's buffers are
+        # released first.
+        QTimer.singleShot(0, native_windows.trim_working_set)
+        logger.info("Overlay hidden")
+
+    def show_overlay(self):
+        if self.isVisible():
+            self.raise_()
+            self.activateWindow()
+            return
+        self.show()
+        if self.pass_through:
+            self._position_pass_through_badge()
+            self._pass_through_badge.show()
+            self._pass_through_badge.raise_()
+        else:
             self.raise_()
             self.activateWindow()
             self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+        logger.info("Overlay shown")
+
+    def toggle_visibility(self):
+        if self.isVisible():
+            self.hide_to_tray()
+        else:
+            self.show_overlay()
 
     def toggle_pass_through(self):
+        if not self.isVisible():
+            # From the tray while hidden: come back first, so the badge
+            # isn't left floating over nothing.
+            self.show_overlay()
         if self._selecting:
             self._cancel_selection_state()
         self.pass_through = not self.pass_through
@@ -1707,6 +1783,13 @@ class Overlay(QWidget):
     # -- lifecycle -----------------------------------------------------------
 
     def closeEvent(self, event):
+        # Alt+F4 (a spontaneous close from Windows) hides like Esc when
+        # there's a tray. Closes Qt sends while quitting are not
+        # spontaneous; ignoring those would cancel the quit.
+        if self._tray_available and event.spontaneous():
+            event.ignore()
+            self.hide_to_tray()
+            return
         # Flush now rather than through the debounced _save_settings().
         # There's no later tick to save on.
         self._settings_save_timer.stop()

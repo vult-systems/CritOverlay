@@ -167,6 +167,16 @@ def exit_glyph(painter, color, size):
     painter.drawLine(QPointF(size - m, m), QPointF(m, size - m))
 
 
+def hide_glyph(painter, color, size):
+    # A chevron dropping onto a bar: put away, not closed.
+    pen = _stroke_pen(color, size * 0.1)
+    painter.setPen(pen)
+    m = size * 0.28
+    painter.drawLine(QPointF(m, size * 0.74), QPointF(size - m, size * 0.74))
+    painter.drawPolyline([QPointF(m + size * 0.04, size * 0.3), QPointF(size / 2, size * 0.54),
+                          QPointF(size - m - size * 0.04, size * 0.3)])
+
+
 def more_glyph(painter, color, size):
     painter.setPen(Qt.PenStyle.NoPen)
     painter.setBrush(QBrush(QColor(color)))
@@ -248,6 +258,7 @@ _GLYPHS = {
     "pass_through": pass_through_glyph,
     "snapshot": snapshot_glyph,
     "exit": exit_glyph,
+    "hide": hide_glyph,
     "more": more_glyph,
     "backdrop_off": backdrop_off_glyph,
     "eyedropper": eyedropper_glyph,
