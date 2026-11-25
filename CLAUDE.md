@@ -15,6 +15,7 @@ packaging\build.bat                                         # locked build + ver
 
 - `build.bat` launches on-screen self-tests that move across every monitor. Use `--no-run` when there is no desktop session.
 - A local `build.bat` is the only check that tours real multi-monitor and mixed-DPI hardware. CI runners have one monitor at 100%.
+- Bound manual runs of the app (hang tests, `--selftest` by hand) with a Job object set to kill on close, and check afterwards that no `CritOverlay`/`python` process is left. Don't use Git Bash `timeout`: on 2026-11-24 it failed to end a hung run and then spun a CPU core for over a day.
 
 ## CI
 
