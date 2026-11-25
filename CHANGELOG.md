@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## v1.5.0-rc.4 (pre-release)
+
+Fourth release candidate for v1.5.0: the app now lives in the tray (#14).
+Everything listed under rc.3, rc.2 and rc.1 also applies. v1.4.2 stays the
+stable release until the acceptance checks in #4 pass.
 
 **Changed**
 
