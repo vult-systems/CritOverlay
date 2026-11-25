@@ -52,15 +52,17 @@ exercises the toolbar and pass-through (see `crit_overlay/selftest.py`).
 | Toolbar | Brush/Eraser buttons, size slider vs `[`/`]` keys, Undo/Redo/Clear enable states, clicking the toolbar doesn't draw, monitor button hidden with one monitor (fake-monitor test) | Pass |
 | Pass-through | On via toolbar: click-through set, toolbar hidden, badge on the covered monitor. Monitor switch while on: badge follows, click-through kept. Off via badge: input, toolbar and button state restored | Pass |
 | Drawing region and margin (#10) | Self-test on each of the 3 monitors (200% / 175% / 100%): black backdrop in a region with a white margin, then a native screen grab | Pass: 1 logical pixel inside every region edge is region and 2 outside is margin at each scale; grab pixel ratio equals the monitor's; region screenshot is exactly region plus margin at device resolution; strokes start only inside region or margin. Unit tests (fake 150% + 100% monitors): clipping, backdrop/margin restriction and independent opacity, eraser over the margin, selection by mouse and pen, Esc, monitor switch with clamping, settings. Repaint cost unchanged without a region; about 5% more per point with one. |
+| Tray, hotkey, one instance (#14) | Packaged exe (local build of the #14 branch), real keyboard and mouse input via `SendInput`, Windows 11 26300, 200% Cintiq primary | Pass: Ctrl+Alt+D hides and shows with a stroke intact; Esc hides, process stays; a second launch exits in 0.1–0.2 s (about 20 MB peak) and brings the running overlay back with keyboard focus; tray menu Exit ends the process with code 0 and no session marker. With Ctrl+Alt+D held by another process: starts anyway, logs "already used by another program", tray menu shows plain "Show/Hide", tray click still shows the overlay. Hidden: 0 ms CPU over 50–60 s, working set 3–9 MB after the trim (once it rose back to about 108 MB within 10 s, cause not identified), private memory unchanged at about 95 MB (the drawing canvas). Start with Windows ticked: shortcut in the Startup folder targeting this copy with `--hidden --portable`; launching that shortcut starts hidden; unticking removes it. The tray notifications themselves were not seen on screen (Windows notification settings); the log records the conflict. The tray right-click was simulated by posting the shell's `WM_CONTEXTMENU` notification, because Windows 11 had the icon in the hidden-icons overflow; the menu clicks were real. |
 | Hot-plug logic | Monitor added; monitor removed (the covered one, and another one); bursts of display events; resolution/scale change | Pass in unit tests on two fake offscreen monitors (150% + 100%), driving the overlay's own `screenAdded`/`screenRemoved`/`geometryChanged` handlers. **Not** with real hardware; see manual checklist. |
 | Settings migration | v1.0–v1.4.2 settings file; 1.5.0 development-build `screens = all/auto` (user file and lab-wide INI, CLI flag); newer-version file; read-only file; missing file | Pass: brush settings carry over unchanged, legacy screen modes become `cursor` with a logged note, newer files untouched, read-only files still load |
-| Builds | Frozen exe built with Python 3.13.17 + PySide6 6.8.3; source runs with Python 3.9.13 + PySide6 6.7.3 and Python 3.13 + 6.8.3 | Pass: `--selftest`, 64 unit tests on both Qt versions |
+| Builds | Frozen exe built with Python 3.13.17 + PySide6 6.8.3; source runs with Python 3.9.13 + PySide6 6.7.3 and Python 3.13 + 6.8.3 | Pass: `--selftest`, 127 unit tests on both Qt versions |
 | Clean environment | Frozen self-test with PATH reduced to System32 and no Python/Qt variables | Pass |
 | Polluted environment | `QT_QPA_PLATFORM=xcb`, `QT_PLUGIN_PATH`/`QT_QPA_PLATFORM_PLUGIN_PATH` to a dir with a fake `qwindows.dll`, `QT_SCALE_FACTOR=1.37`, `PYTHONHOME`/`PYTHONPATH` to junk, fake `python313.dll` first on PATH | Pass (variables cleared and logged) |
 | Qt 5 on the machine | PySide2 5.15 installed; Qt 5 plugin paths in the environment | Pass |
 | Paths | Run from a folder named `Crit Övërlay tëst (ünïcode)` | Pass |
 | Portable mode | `CritOverlay.ini` with `portable = true` next to the exe | Pass; settings, logs, screenshots stay in `CritOverlay-data\` |
 | Startup recovery | Qt hang (`QT_QPA_PLATFORM=xcb` kept): watchdog ends it after timeout + 3 s; next launch reports it once. Deleted `Qt6Widgets.dll`/`qwindows.dll`; deleted shiboken module; invalid CLI flag; forced native segfault | Pass: plain-language messages, crash report files, exit codes 2 / 3 / 4, faulthandler stack, unclean-exit note on next launch |
+| Startup watchdog, re-run 2026-11-25 | Forced Qt hang with `CRITOVERLAY_STARTUP_TIMEOUT=5`: packaged rc.3 exe, and source on Python 3.9 + PySide6 6.7.3 and 3.13 + 6.8.3, each in a Job object with a 40 s hard limit | Pass: the process ends itself at 8.5 s in every case (5 s + 3 s), one process, nothing left running, about 21 MB peak commit, stack dumped to `faulthandler.log`. The next launch logs "got stuck ... stopped by the watchdog" and the unclean-exit note once; the launch after that is quiet. The exit code is not meaningful (low byte 1, upper bits arbitrary): the native timer calls `TerminateProcess` with whatever is in the argument register. |
 | Static audit | Every bundled .exe/.dll/.pyd imports only bundled DLLs or DLLs that ship with Windows 10 1809+ | Pass (94 binaries) |
 | Reproducibility | Two consecutive clean builds on the same machine (Python 3.13) | Byte-identical exes and zip |
 | Performance | 400-point strokes with forced repaints, on the 200% monitor | v1.5.0-rc.1 2.53 ms/point at full 2x resolution vs v1.4.2 2.81 ms/point at 1x. Startup to ready about 0.5 s warm, 1.6 s first launch. |
@@ -138,6 +140,14 @@ a person at the machine, and they're the release gate. Record the machine
     and updates it while dragging (#13). Strokes stop at the margin's
     outer edge and can't start outside. F9 saves only region plus margin, with no desktop in the
     margin. Esc during a selection cancels it without closing the app.
+
+**Tray and hotkey** (#14)
+15. On a managed lab machine: Esc hides, Ctrl+Alt+D brings it back from
+    inside the lab's main apps (including any running as administrator),
+    and tray > Exit quits. Tick Start with Windows, log off and on: it
+    starts hidden in the tray (or record that the profile resets the
+    Startup folder). Check the tray notification when another app owns
+    Ctrl+Alt+D.
 
 ## Automated release check
 

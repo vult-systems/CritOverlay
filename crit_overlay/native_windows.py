@@ -93,6 +93,29 @@ def set_window_rect(hwnd, rect):
         return False
 
 
+def is_window_visible(hwnd):
+    _user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    _user32.IsWindowVisible.restype = wintypes.BOOL
+    return bool(_user32.IsWindowVisible(wintypes.HWND(hwnd)))
+
+
+def trim_working_set():
+    """Let Windows page out what this process isn't using right now. Called
+    when the overlay hides to the tray: nothing is lost (pages come back on
+    demand when it's shown), but an idle tray app stops holding on to RAM
+    it touched while drawing. Returns True on success."""
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.SetProcessWorkingSetSize.argtypes = [wintypes.HANDLE, ctypes.c_size_t, ctypes.c_size_t]
+        kernel32.SetProcessWorkingSetSize.restype = wintypes.BOOL
+        minus_one = ctypes.c_size_t(-1).value
+        return bool(kernel32.SetProcessWorkingSetSize(kernel32.GetCurrentProcess(), minus_one, minus_one))
+    except Exception:
+        logger.debug("SetProcessWorkingSetSize failed", exc_info=True)
+        return False
+
+
 def is_remote_session():
     try:
         _user32.GetSystemMetrics.argtypes = [ctypes.c_int]

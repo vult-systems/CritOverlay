@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 from . import constants as C
+from . import hotkeys
 from . import paths
 
 INPUT_MODES = ("auto", "mouse")
@@ -106,6 +107,8 @@ class Options:
         self.selftest = False
         self.dialogs = True
         self.screenshot_dir = None
+        self.hotkey = C.DEFAULT_HOTKEY
+        self.hidden = False
         # Where each value came from, for the diagnostics report.
         self.sources = {}
         self.warnings = []
@@ -113,7 +116,7 @@ class Options:
 
     def as_dict(self):
         keys = ("debug", "safe_mode", "input", "screens", "keep_qt_env", "portable", "diagnose", "selftest",
-                "dialogs", "screenshot_dir")
+                "dialogs", "screenshot_dir", "hotkey", "hidden")
         return {k: getattr(self, k) for k in keys}
 
 
@@ -143,6 +146,10 @@ def build_arg_parser():
                    help="write a compatibility report, open it, and exit")
     p.add_argument("--selftest", action="store_true", default=None,
                    help="start up, exercise the overlay without user input, report, and exit (0 = pass)")
+    p.add_argument("--hotkey", default=None,
+                   help=f"global show/hide hotkey (default {C.DEFAULT_HOTKEY}; 'none' turns it off)")
+    p.add_argument("--hidden", action="store_true", default=None,
+                   help="start in the notification area with the overlay hidden (used by Start with Windows)")
     p.add_argument("--no-dialogs", action="store_true", default=None,
                    help="never show message boxes (for scripted runs)")
     return p
@@ -169,6 +176,14 @@ def _read_ini_compat(path):
     if not parser.has_section("compat"):
         return {}
     return {k.strip().lower(): v.strip() for k, v in parser.items("compat")}
+
+
+def _hotkey_error(value):
+    try:
+        hotkeys.parse(value)
+    except hotkeys.HotkeyError as e:
+        return str(e)
+    return None
 
 
 def _apply_ini(opts, values, source):
@@ -206,6 +221,12 @@ def _apply_ini(opts, values, source):
             opts.screens = low
         elif name == "screenshot_dir":
             opts.screenshot_dir = os.path.expandvars(value) or None
+        elif name == "hotkey":
+            error = _hotkey_error(value)
+            if error:
+                opts.warnings.append(f"{source}: ignoring hotkey={raw!r} ({error})")
+                continue
+            opts.hotkey = value
         else:
             opts.warnings.append(f"{source}: unknown [compat] key {key!r}")
             continue
@@ -251,7 +272,13 @@ def parse_options(argv, app_ini=None, user_ini_resolver=None):
         "diagnose": cli.diagnose,
         "selftest": cli.selftest,
         "screenshot_dir": cli.screenshot_dir,
+        "hidden": cli.hidden,
     }
+    if cli.hotkey is not None:
+        error = _hotkey_error(cli.hotkey)
+        if error:
+            raise OptionsError(f"--hotkey: {error}\n\n{build_arg_parser().format_usage()}")
+        mapping["hotkey"] = cli.hotkey
     if cli.screens in LEGACY_SCREEN_MODES:
         opts.warnings.append(
             f"command line: --screens {cli.screens} is from an older version; using "

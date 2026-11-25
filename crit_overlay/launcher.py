@@ -12,7 +12,8 @@ matters:
 6. Hand off to app.run() for everything Qt.
 
 Exit codes: 0 ok, 1 unexpected error, 2 incomplete installation, 3 Qt failed
-to load, 4 bad command line, 5 self-test failed.
+to load, 4 bad command line, 5 self-test failed. A second launch while a
+copy is running shows that copy's overlay and exits with 0.
 """
 
 import logging
@@ -23,6 +24,7 @@ import traceback
 from . import compat
 from . import constants as C
 from . import crash
+from . import instance
 from . import paths
 from .logging_setup import setup_logging
 
@@ -103,6 +105,18 @@ def _main(argv):
             "A previous session did not exit cleanly (%s). If it crashed, the stack is in %s",
             entry, fault_log or "faulthandler.log",
         )
+    if not (opts.selftest or opts.diagnose):
+        # One copy per session (#14). Checked before Qt loads, so a second
+        # launch costs a fraction of a second; it just brings the running
+        # copy's overlay back. --selftest and --diagnose run alongside.
+        running = instance.acquire()
+        if running.already_running:
+            shown = running.request_show()
+            logger.info("Another copy is already running; %s", "asked it to show the overlay" if shown
+                        else "couldn't signal it")
+            running.close()
+            return EXIT_OK
+
     if crash.previous_startup_hung():
         logger.error("The previous launch got stuck while starting Qt and was stopped by the watchdog")
         crash.native_message_box(

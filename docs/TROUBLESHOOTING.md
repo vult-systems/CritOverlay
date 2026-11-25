@@ -27,7 +27,17 @@ open the log folder.
 | "Qt failed to load" | Damaged `_internal` folder (standalone) or PySide6 not installed (source) | Re-extract; from source run `python -m pip install --user -r requirements.txt` |
 | PyInstaller "Failed to load Python DLL" | Exe started without its `_internal` folder (e.g. from inside the zip) | Extract the whole zip first |
 | "Previous start failed ... got stuck" on the next launch | Qt hung while initializing and the 60 s watchdog closed it | Try `--safe-mode`; send `faulthandler.log` and the log |
+| Starting it does nothing while a copy is already running | A second launch only asks the running copy to show its overlay (log: "Another copy is already running"). If that copy is hung, nothing appears | End CritOverlay.exe in Task Manager, then start it again |
 | Nothing at all, no message | Blocked before our code runs (application control), or a hang | Check Task Manager for CritOverlay.exe; run `CritOverlay-console.exe --debug` from a command prompt to see output |
+
+## Tray, hotkey and startup
+
+| What you see | Cause | Fix |
+|---|---|---|
+| Esc made the overlay disappear | Esc hides to the tray; your drawing is kept | Ctrl+Alt+D or click the tray icon. To quit, right-click the tray icon > Exit |
+| "Ctrl+Alt+D is already used by another program" | Another app registered the same global hotkey first | Set another one, e.g. `hotkey = Ctrl+Shift+F10` under `[compat]` in the settings file, and restart. The tray icon works meanwhile |
+| Start with Windows won't stay ticked | The Startup folder isn't writable (policy) or a lab image resets it at logoff | Ask IT, or start it from a shortcut each time. The log names the folder and error |
+| Started at logon but nothing shows | Start with Windows starts it hidden | Ctrl+Alt+D or the tray icon |
 
 ## Monitors
 

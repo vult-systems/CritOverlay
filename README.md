@@ -32,7 +32,9 @@ screen-sharing a paint-over is faster than describing what I mean.
   closing the overlay.
 - Screenshots of the monitor your cursor is on, saved to
   `Pictures\CritOverlay\` and opened in Explorer.
-- Tray icon to hide and show it without quitting.
+- Lives in the tray: Esc hides the overlay, **Ctrl+Alt+D** (from any app)
+  or the tray icon brings it back with your drawing intact, and Exit is in
+  the tray menu. Only one copy runs at a time. Optional Start with Windows.
 - Brush and margin settings persist between sessions.
 
 ## Requirements
@@ -76,15 +78,38 @@ Or double-click `run.bat`. Use `run_debug.bat` if you want console logging.
 | F7 | Move the overlay to the next monitor (same as the toolbar's monitor button) |
 | F8 | Toggle pass-through |
 | F9 | Screenshot: the drawing region and its margin if one is set, otherwise the monitor under the cursor |
-| Esc | Cancel a region selection; otherwise exit |
+| Esc | Cancel a region selection; otherwise hide the overlay to the tray (drawings are kept) |
+| Ctrl+Alt+D | Show or hide the overlay from any app (global; [configurable](#tray-hotkey-and-startup)) |
 
 F8 and F9 are Qt shortcuts, so they need the overlay to have keyboard
 focus. Once you click into another app during pass-through, use the badge at
 the top of the screen to get back.
 
 Left-clicking the tray icon hides and shows the overlay. Its right-click
-menu has pass-through, screenshot, move to next monitor, a Troubleshooting
-submenu (diagnostics report, log folder), and exit.
+menu has pass-through, screenshot, move to next monitor, Start with
+Windows, a Troubleshooting submenu (diagnostics report, log folder), and
+Exit.
+
+### Tray, hotkey and startup
+
+- **Hiding isn't quitting.** Esc, the toolbar's last button and Alt+F4 hide
+  the overlay; strokes, undo history, the region, margin, backdrop and
+  pass-through are all still there when it comes back. While hidden it
+  uses no CPU and gives back the memory it isn't using.
+- **Exit** from the tray menu ends the app. On a machine with no
+  notification area (some locked-down kiosks), Esc exits instead, since
+  there'd be no way back.
+- **Ctrl+Alt+D** toggles the overlay from anywhere. To change it, set
+  `hotkey` in `[compat]` (`CritOverlay.ini` next to the exe, or your own
+  settings file) or pass `--hotkey`, e.g. `hotkey = Ctrl+Shift+F10`. Ctrl,
+  Alt or Win is required; `none` turns it off. If another program already
+  uses the combination, Crit Overlay still starts, says so in a tray
+  notification, and the tray icon works as usual.
+- **One copy at a time.** Starting it again while it runs (even hidden)
+  just brings the running overlay to the front.
+- **Start with Windows** (tray menu, off by default) puts a shortcut in
+  your Startup folder that starts it hidden in the tray at logon. No
+  registry changes; untick it, or delete the shortcut, to undo.
 
 ## Monitors
 
@@ -149,6 +174,8 @@ Command-line flags, or the same keys in a `[compat]` section of
 | `--screens cursor/primary` | Which monitor to start on (default: the one under the mouse) |
 | `--portable` | Keep settings, logs and screenshots beside the exe |
 | `--screenshot-dir DIR` | Where screenshots go first |
+| `--hotkey KEYS` | Global show/hide hotkey (default `Ctrl+Alt+D`; `none` turns it off) |
+| `--hidden` | Start hidden in the tray (what Start with Windows uses; command line only) |
 | `--debug` | Verbose logging |
 | `--diagnose` | Write a compatibility report and open it |
 | `--selftest` | Start, exercise the overlay automatically, report, exit (0 = pass) |
@@ -214,8 +241,11 @@ crit_overlay/
   config.py             saved settings
   logging_setup.py      rotating file logger
   tray.py               tray icon
+  hotkeys.py            global hotkey parsing and registration
+  instance.py           one running copy per session
+  autostart.py          Start with Windows (Startup-folder shortcut)
   pass_through_badge.py the way back out of pass-through
-  native_windows.py     Win32 calls (click-through, system info)
+  native_windows.py     Win32 calls (click-through, working set, system info)
   icon.py               app icon, drawn in code
 packaging/              build script, PyInstaller spec, lock file, verifier
 docs/                   compatibility, deployment, troubleshooting, building
