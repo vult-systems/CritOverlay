@@ -35,6 +35,7 @@ open the log folder.
 | What you see | Cause | Fix |
 |---|---|---|
 | Esc made the overlay disappear | Esc hides to the tray; your drawing is kept | Ctrl+Alt+D or click the tray icon. To quit, right-click the tray icon > Exit |
+| Can't find the tray icon | Windows 11 puts new tray icons in the hidden-icons overflow (the ^ next to the clock) | Click ^ to find it, and drag it onto the taskbar to keep it there. Ctrl+Alt+D works either way |
 | "Ctrl+Alt+D is already used by another program" | Another app registered the same global hotkey first | Set another one, e.g. `hotkey = Ctrl+Shift+F10` under `[compat]` in the settings file, and restart. The tray icon works meanwhile |
 | Start with Windows won't stay ticked | The Startup folder isn't writable (policy) or a lab image resets it at logoff | Ask IT, or start it from a shortcut each time. The log names the folder and error |
 | Started at logon but nothing shows | Start with Windows starts it hidden | Ctrl+Alt+D or the tray icon |

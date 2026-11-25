@@ -206,6 +206,8 @@ page](https://github.com/vult-systems/CritOverlay/releases). v1.4.2 is the
 current stable release. v1.5.0 release candidates (`v1.5.0-rc.N`) are
 marked as pre-releases until they pass the hardware and lab-machine
 checks in [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md#manual-validation-required-before-release).
+v1.5.0 is feature-frozen at rc.4; what it ships with is under
+[Known limitations](docs/COMPATIBILITY.md#known-limitations-v150).
 
 ## Logs and settings
 
