@@ -24,6 +24,7 @@ from PySide6.QtGui import QGuiApplication, QMouseEvent
 from . import app as app_module
 from . import constants as C
 from . import diagnostics
+from . import hotkeys
 from . import native_windows
 from . import paths
 
@@ -364,6 +365,61 @@ def _monitor_tour_steps(overlay, results):
     return steps
 
 
+def _lifecycle_steps(app, overlay, results):
+    """Global hotkey delivery and hide/show keeping state (#14). Uses its
+    own unlikely hotkey, never the configured one, and posts the WM_HOTKEY
+    itself, so it doesn't depend on (or take) a key someone else uses."""
+    steps = []
+    hits = []
+    event_filter = app_module.HotkeyFilter()
+    hotkey = app_module.GlobalHotkey(event_filter, 0x5E1F, "Ctrl+Alt+Shift+F24", lambda: hits.append(1))
+    state = {}
+
+    def post():
+        app.installNativeEventFilter(event_filter)
+        problem = hotkey.register()
+        state["problem"] = problem
+        if problem is None:
+            hotkeys.post_test_hotkey(0x5E1F)
+
+    def check_hotkey():
+        hotkey.unregister()
+        app.removeNativeEventFilter(event_filter)
+        if state["problem"]:
+            results.warn("Global hotkey test skipped", state["problem"])
+        else:
+            results.check("Global hotkey message reaches the app", hits == [1], f"{len(hits)} delivered")
+
+    def hide():
+        _draw_test_stroke(overlay)
+        overlay.region = QRect(overlay._anchor_local_rect().adjusted(40, 40, -40, -40))
+        state["before"] = (len(overlay.history), QRect(overlay.region), overlay._canvas.toImage())
+        # Nothing to persist in a self-test; hide_to_tray would save.
+        overlay.save_settings_now = lambda: None
+        try:
+            overlay.hide_to_tray()
+        finally:
+            del overlay.save_settings_now
+
+    def show():
+        results.check("Hide to tray hides the window", not overlay.isVisible()
+                      and not native_windows.is_window_visible(int(overlay.winId())))
+        overlay.show_overlay()
+
+    def check_shown():
+        count, region, image = state["before"]
+        ok, actual, expected = overlay.native_geometry_ok()
+        results.check("Showing again keeps strokes, region and placement",
+                      overlay.isVisible() and len(overlay.history) == count and overlay.region == region
+                      and overlay._canvas.toImage() == image and ok,
+                      f"native {actual}, expected {expected}")
+        overlay.region = None
+        overlay.clear()
+
+    steps += [(post, 300), (check_hotkey, 0), (hide, 400), (show, 600), (check_shown, 0)]
+    return steps
+
+
 def run_selftest(app, overlay, opts):
     results = _Results()
     state = {"code": EXIT_SELFTEST_FAILED}
@@ -403,7 +459,7 @@ def run_selftest(app, overlay, opts):
     def first_phase():
         try:
             _run_checks(app, overlay, opts, results)
-            steps = _monitor_tour_steps(overlay, results)
+            steps = _monitor_tour_steps(overlay, results) + _lifecycle_steps(app, overlay, results)
         except Exception as exc:
             logger.exception("Self-test crashed")
             results.check("Self-test ran to completion", False, repr(exc))
