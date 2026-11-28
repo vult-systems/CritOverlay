@@ -23,6 +23,7 @@ from PySide6.QtGui import QGuiApplication, QMouseEvent
 
 from . import app as app_module
 from . import constants as C
+from . import dab
 from . import diagnostics
 from . import hotkeys
 from . import native_windows
@@ -159,11 +160,13 @@ def _toolbar_checks(overlay, results):
     results.check("Toolbar Brush/Eraser buttons switch tools", eraser and brush)
 
     original = overlay.brush_size
-    probe = original + 3 if original + 3 <= C.MAX_SIZE else original - 3
+    start = overlay.size_slider.value()
+    probe = start + 60 if start + 60 <= overlay.size_slider.maximum() else start - 60
     overlay.size_slider.setValue(probe)
-    slider_to_model = overlay.brush_size == probe and overlay.size_value_label.text() == f"{probe}px"
+    slider_to_model = (abs(overlay.brush_size - dab.slider_to_size(probe)) < 0.01
+                       and overlay.size_value_label.text() == dab.format_size(overlay.brush_size))
     overlay.change_size(-1)
-    key_to_slider = overlay.size_slider.value() == probe - 1
+    key_to_slider = overlay.size_slider.value() < probe
     overlay._set_size(original)
     results.check("Size slider and [ / ] keys stay in sync", slider_to_model and key_to_slider)
 

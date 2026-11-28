@@ -277,11 +277,16 @@ def render_shape_layer(stroke, dpr=1.0):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawPath(shape_path(stroke))
         if stroke.erasures:
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+            from . import dab
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationOut)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
             for eraser, transform in stroke.erasures:
+                found = dab.freehand_layer(eraser, dpr)
+                if found is None:
+                    continue
                 painter.save()
                 painter.setTransform(transform, True)
-                paint_segments(painter, stroke_segments(eraser), QColor(0, 0, 0, 255))
+                painter.drawPixmap(found[1], found[0])
                 painter.restore()
     finally:
         painter.end()

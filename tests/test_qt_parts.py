@@ -13,6 +13,7 @@ from PySide6.QtCore import QPoint, QPointF, QSettings, QSize  # noqa: E402
 
 from crit_overlay import brush  # noqa: E402
 from crit_overlay import constants as C  # noqa: E402
+from crit_overlay import dab  # noqa: E402
 from crit_overlay.config import SETTINGS_VERSION, AppConfig  # noqa: E402
 from crit_overlay.models import Stroke  # noqa: E402
 
@@ -110,6 +111,9 @@ class MigrationTests(unittest.TestCase):
             # Text tool prototype: absent from old files, so defaults.
             "text_family": "IBM Plex Sans", "text_size": C.DEFAULT_TEXT_SIZE, "text_bold": False,
             "text_align": "left",
+            # Brush engine prototype: also new, so defaults.
+            "brush_preset": dab.DEFAULT_PRESET, "eraser_size": C.DEFAULT_ERASER_SIZE,
+            "brush_tuning": {k: (p.hardness, p.spacing) for k, p in dab.PRESETS.items()},
         })
         q = QSettings(str(self.path), QSettings.Format.IniFormat)
         self.assertEqual(int(q.value("meta/settings_version")), SETTINGS_VERSION)

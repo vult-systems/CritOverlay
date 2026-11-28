@@ -95,7 +95,7 @@ class AppConfig:
             color = C.DEFAULT_COLOR
         return {
             "color": color,
-            "size": int(_clamp(self._value("brush/size", C.DEFAULT_SIZE, int), C.MIN_SIZE, C.MAX_SIZE)),
+            "size": round(_clamp(self._value("brush/size", C.DEFAULT_SIZE, float), C.MIN_SIZE, C.MAX_SIZE), 2),
             "opacity": _clamp(self._value("brush/opacity", C.DEFAULT_OPACITY, float), 0.05, 1.0),
             "smoothing": _clamp(self._value("brush/smoothing", C.DEFAULT_SMOOTHING, float), 0.0, 0.9),
             "backdrop": backdrop,
@@ -104,6 +104,22 @@ class AppConfig:
             ),
             **self._load_margin(),
             **self._load_text(),
+            **self._load_brush(),
+        }
+
+    def _load_brush(self):
+        # Brush engine prototype keys; new, so older files fall back.
+        from . import dab
+        preset = self._value("brush/preset", dab.DEFAULT_PRESET, str)
+        tuning = {}
+        for key, p in dab.PRESETS.items():
+            tuning[key] = (_clamp(self._value(f"brush/{key}_hardness", p.hardness, float), 0.0, 1.0),
+                           _clamp(self._value(f"brush/{key}_spacing", p.spacing, float), 0.02, 0.5))
+        return {
+            "brush_preset": preset if preset in dab.PRESET_KEYS else dab.DEFAULT_PRESET,
+            "eraser_size": round(_clamp(self._value("brush/eraser_size", C.DEFAULT_ERASER_SIZE, float),
+                                        C.MIN_SIZE, C.MAX_SIZE), 2),
+            "brush_tuning": tuning,
         }
 
     def _load_text(self):
@@ -135,9 +151,17 @@ class AppConfig:
     def save(self, *, color, size, opacity, smoothing, backdrop, backdrop_opacity,
              margin_enabled=C.DEFAULT_MARGIN_ENABLED, margin_size=C.DEFAULT_MARGIN_SIZE,
              margin_color=C.DEFAULT_MARGIN_COLOR, margin_opacity=C.DEFAULT_MARGIN_OPACITY,
-             text_family=None, text_size=C.DEFAULT_TEXT_SIZE, text_bold=False, text_align="left"):
+             text_family=None, text_size=C.DEFAULT_TEXT_SIZE, text_bold=False, text_align="left",
+             eraser_size=None, brush_preset=None, brush_tuning=None):
         self._settings.setValue("brush/color", QColor(color).name())
-        self._settings.setValue("brush/size", int(size))
+        self._settings.setValue("brush/size", round(float(size), 2))
+        if eraser_size is not None:
+            self._settings.setValue("brush/eraser_size", round(float(eraser_size), 2))
+        if brush_preset:
+            self._settings.setValue("brush/preset", brush_preset)
+        for key, (h, s) in (brush_tuning or {}).items():
+            self._settings.setValue(f"brush/{key}_hardness", round(float(h), 3))
+            self._settings.setValue(f"brush/{key}_spacing", round(float(s), 3))
         self._settings.setValue("brush/opacity", float(opacity))
         self._settings.setValue("brush/smoothing", float(smoothing))
         self._settings.setValue("brush/backdrop", backdrop or _BACKDROP_NONE)

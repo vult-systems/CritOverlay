@@ -7,7 +7,7 @@ from PySide6.QtGui import QColor, QTransform
 
 
 class Stroke:
-    __slots__ = ("color", "size", "opacity", "eraser", "points", "shape", "text", "font", "erasures")
+    __slots__ = ("color", "size", "opacity", "eraser", "points", "shape", "text", "font", "erasures", "brush", "__weakref__")
 
     def __init__(self, color, size, opacity, eraser=False, shape=None):
         self.color = QColor(color)
@@ -27,6 +27,10 @@ class Stroke:
         # is now. They keep erased parts with the annotation when it is moved
         # or resized (see selection.absorb and brush.render_shape_layer).
         self.erasures = ()
+        # Freehand only: a dab.BrushSpec for the raster dab engine, or None
+        # for the classic segment engine. points then hold (position,
+        # smoothed pen pressure) instead of the classic blended pressure.
+        self.brush = None
 
     def copy(self):
         dup = Stroke(self.color, self.size, self.opacity, self.eraser, self.shape)
@@ -34,6 +38,7 @@ class Stroke:
         dup.text = self.text
         if self.font is not None:
             dup.font = TextStyle(self.font.family, self.font.bold, self.font.align)
+        dup.brush = self.brush
         dup.erasures = tuple((e, QTransform(t)) for e, t in self.erasures)
         return dup
 

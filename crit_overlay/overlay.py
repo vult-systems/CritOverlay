@@ -17,6 +17,7 @@ from PySide6.QtGui import (
     QPen,
     QInputDevice,
     QPointingDevice,
+    QRegion,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -31,6 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import brush
+from . import dab
 from . import capture as capture_mod
 from . import compat
 from . import constants as C
@@ -40,6 +42,7 @@ from . import paths
 from . import region as region_mod
 from . import selection as sel_mod
 from . import text_fonts
+from .brush_popup import BrushPopup
 from .color_popup import ColorPopup
 from .config import AppConfig
 from .models import SHAPES, History, Stroke, TextStyle
@@ -155,6 +158,19 @@ class Overlay(QWidget):
         self.brush_size = saved["size"]
         self.opacity = saved["opacity"]
         self.smoothing = saved["smoothing"]
+        # Brush engine (dab.py): the preset for new freehand strokes, the
+        # per-preset tuning, and a separate eraser size.
+        self.eraser_size = saved["eraser_size"]
+        self.brush_preset = saved["brush_preset"]
+        self.brush_tuning = dict(saved["brush_tuning"])
+        self._brush_popup = None
+        self._dab = None             # DabRenderer of the stroke being drawn
+        self._dab_done = 0           # spline segments already in the live layer
+        self._dab_pressure = 1.0     # smoothed pen pressure
+        self._dab_live_pressure = False
+        self._live_tail = None       # provisional last segment, (pixmap, origin)
+        self._input_has_pressure = False
+        self._size_preview_until = 0.0
         self.backdrop = saved["backdrop"]
         self.backdrop_opacity = saved["backdrop_opacity"]
         self.pass_through = False
@@ -637,13 +653,13 @@ class Overlay(QWidget):
 
         self.select_btn = tool_button("select", "Select and move (V)", checkable=True)
         self.select_btn.clicked.connect(lambda: self._set_mode("select"))
-        self.brush_btn = tool_button("brush", "Brush (B)", checkable=True)
+        self.brush_btn = tool_button("brush", "Brush (B). Click again for presets", checkable=True)
         self.eraser_btn = tool_button("eraser", "Eraser (E)", checkable=True)
         self.eyedropper_btn = tool_button("eyedropper", "Eyedropper (Alt+click)", checkable=True)
         self.brush_btn.setChecked(self.mode == "brush")
         self.eraser_btn.setChecked(self.mode == "eraser")
         self.eyedropper_btn.setChecked(self.mode == "eyedropper")
-        self.brush_btn.clicked.connect(lambda: self._set_mode("brush"))
+        self.brush_btn.clicked.connect(self._on_brush_button)
         self.eraser_btn.clicked.connect(lambda: self._set_mode("eraser"))
         self.eyedropper_btn.clicked.connect(self._toggle_eyedropper)
         # One button for all shapes keeps the toolbar compact: it selects
@@ -680,7 +696,8 @@ class Overlay(QWidget):
         sep()
 
         size_row, self.size_slider, self.size_value_label = self._build_slider_row(
-            panel, "SIZE", C.MIN_SIZE, C.MAX_SIZE, self.brush_size, lambda v: f"{v}px",
+            panel, "SIZE", 0, dab.SIZE_STEPS, dab.size_to_slider(self.brush_size),
+            lambda v: dab.format_size(dab.slider_to_size(v)),
             self._on_size_slider_changed, "Brush size ([ / ])"
         )
         layout.addWidget(size_row)
@@ -1281,6 +1298,9 @@ class Overlay(QWidget):
             text_size=self.text_size,
             text_bold=self.text_bold,
             text_align=self.text_align,
+            eraser_size=self.eraser_size,
+            brush_preset=self.brush_preset,
+            brush_tuning=self.brush_tuning,
         )
 
     # State setters. Every mutable tool property goes through one of these,
@@ -1309,6 +1329,53 @@ class Overlay(QWidget):
             self._last_shape = mode
             self.shape_btn.setIcon(icons.build_icon(mode))
         self.shape_btn.setChecked(mode in SHAPES)
+        if getattr(self, "size_slider", None) is not None:
+            self._sync_size_slider()
+        self.update()
+
+    def _on_brush_button(self):
+        was_brush = self.mode == "brush"
+        self._set_mode("brush")
+        if was_brush:
+            if self._brush_popup is None:
+                self._brush_popup = BrushPopup(self)
+            self._brush_popup.show_below(self.brush_btn)
+
+    def _set_brush_preset(self, key):
+        if key not in dab.PRESET_KEYS:
+            return
+        self.brush_preset = key
+        if self.mode != "brush":
+            self._set_mode("brush")
+        self.status_changed.emit(dab.LABELS[key])
+        self._show_size_preview()
+        self._save_settings()
+
+    def _tuning_for(self, key):
+        p = dab.PRESETS[key]
+        return self.brush_tuning.get(key, (p.hardness, p.spacing))
+
+    def _set_brush_tuning(self, hardness=None, spacing=None):
+        key = self.brush_preset
+        if key == dab.CLASSIC:
+            return
+        h, s = self._tuning_for(key)
+        self.brush_tuning[key] = (h if hardness is None else hardness, s if spacing is None else spacing)
+        self._show_size_preview()
+        self._save_settings()
+
+    def _brush_spec(self, eraser, taper):
+        if eraser:
+            return dab.make_spec("eraser")
+        h, s = self._tuning_for(self.brush_preset)
+        return dab.make_spec(self.brush_preset, h, s, taper)
+
+    def _show_size_preview(self):
+        """Show the brush at its real size and softness for a moment, at
+        the last canvas position (or the center), while size or tuning
+        changes."""
+        self._size_preview_until = time.monotonic() + 0.9
+        QTimer.singleShot(950, self.update)
         self.update()
 
     def _on_shape_button(self):
@@ -1360,23 +1427,35 @@ class Overlay(QWidget):
         if self.mode == "eyedropper":
             self._set_mode(self._pre_eyedropper_mode)
 
-    def _set_size(self, value):
-        value = max(C.MIN_SIZE, min(C.MAX_SIZE, int(round(value))))
-        self.brush_size = value
+    def _active_size(self):
+        return self.eraser_size if self.mode == "eraser" else self.brush_size
+
+    def _sync_size_slider(self):
+        value = self._active_size()
         self.size_slider.blockSignals(True)
-        self.size_slider.setValue(value)
+        self.size_slider.setValue(dab.size_to_slider(value))
         self.size_slider.blockSignals(False)
-        self.size_value_label.setText(f"{value}px")
+        self.size_value_label.setText(dab.format_size(value))
+
+    def _set_size(self, value):
+        value = round(max(C.MIN_SIZE, min(C.MAX_SIZE, float(value))), 2)
+        if self.mode == "eraser":
+            self.eraser_size = value
+        else:
+            self.brush_size = value
+        self._sync_size_slider()
+        if self.mode in ("brush", "eraser"):
+            self._show_size_preview()
         if self.selection is not None and self.selection.shape != "text":
             size = value / self._view_scale()
             self._modify_selection(lambda s: setattr(s, "size", size), merge_key="size")
         self._save_settings()
 
     def _on_size_slider_changed(self, v):
-        self._set_size(v)
+        self._set_size(dab.slider_to_size(v))
 
     def change_size(self, delta):
-        self._set_size(self.brush_size + delta)
+        self._set_size(dab.step_size(self._active_size(), delta))
 
     def _set_opacity(self, percent):
         percent = max(5, min(100, int(round(percent))))
@@ -2022,7 +2101,10 @@ class Overlay(QWidget):
         # Brush size is on-screen size; a fitted (shrunk) capture gets a
         # proportionally larger stroke in image pixels.
         shape = self.mode if self.mode in SHAPES and not use_eraser else None
-        self.current = Stroke(self.color, self.brush_size / self._view_scale(), self.opacity, use_eraser, shape)
+        base = self.eraser_size if use_eraser else self.brush_size
+        self.current = Stroke(self.color, base / self._view_scale(), self.opacity, use_eraser, shape)
+        self._dab = None
+        self._live_tail = None
         self._live_layer = None
         self._live_layer_origin = None
         self._live_baked_index = 0
@@ -2034,6 +2116,24 @@ class Overlay(QWidget):
             self.current.points = [(QPointF(pos), brush.SHAPE_PRESSURE), (QPointF(pos), brush.SHAPE_PRESSURE)]
             self.history.redo_stack.clear()
             self._refresh_history_buttons()
+            return
+        if self.brush_preset != dab.CLASSIC:
+            # Dab engine. Without real pen pressure, full pressure and
+            # tapered ends.
+            has_pressure = self._input_has_pressure
+            self._dab_live_pressure = has_pressure
+            self._dab_pressure = self.pressure if has_pressure else 1.0
+            self.current.brush = self._brush_spec(use_eraser, taper=not has_pressure)
+            self.current.points.append((QPointF(self.lazy_pos), self._dab_pressure))
+            self._last_point_time = time.monotonic()
+            self._dab = dab.DabRenderer(self.current)
+            self._dab_done = 0
+            first = self._dab.start()
+            self._add_live_dabs(first)
+            self.history.redo_stack.clear()
+            self._refresh_history_buttons()
+            if first:
+                self._update_doc_rect(QRectF(dab.dab_bounds(first)))
             return
         # Seed the first point immediately (rather than waiting for enough
         # movement to pass the lazy-brush radius) so a plain tap still
@@ -2084,8 +2184,13 @@ class Overlay(QWidget):
             now = time.monotonic()
             dt = max(1e-3, now - self._last_point_time)
             speed = moved * view_scale / dt  # on-screen speed
-            self._last_effective_pressure = brush.effective_pressure(self.pressure, speed)
-            self.current.points.append((QPointF(self.lazy_pos), self._last_effective_pressure))
+            if self.current.brush is not None:
+                if self._dab_live_pressure:
+                    self._dab_pressure += (self.pressure - self._dab_pressure) * dab.PRESSURE_EASE
+                self.current.points.append((QPointF(self.lazy_pos), self._dab_pressure))
+            else:
+                self._last_effective_pressure = brush.effective_pressure(self.pressure, speed)
+                self.current.points.append((QPointF(self.lazy_pos), self._last_effective_pressure))
             self._last_point_time = now
             self._extend_live_layer()
         self._mark_dirty(prev_cursor, raw, prev_lazy, self.lazy_pos)
@@ -2121,7 +2226,114 @@ class Overlay(QWidget):
     # overlap reproduces the same curve as a full-stroke recompute.
     _LIVE_LAYER_OVERLAP = 3
 
+    def _update_doc_rect(self, rect):
+        """Repaint a stroke-coordinate rect."""
+        if self.capture is not None:
+            rect = self.capture.transform().mapRect(rect)
+        self.update(rect.toAlignedRect().adjusted(-2, -2, 2, 2))
+
+    def _add_live_dabs(self, dabs):
+        layer = dab.render_dabs(self.current, dabs, self._canvas_dpr())
+        if layer is not None:
+            self._merge_live(*layer)
+
+    def _extend_live_dabs(self):
+        """Dab engine: render each spline segment once, as soon as the point
+        after it fixes its curve. The last segment is drawn as a provisional
+        tail every event, so the stroke reaches the pen without waiting."""
+        stroke = self.current
+        n = len(stroke.points)
+        dirty = QRectF()
+        if self._live_tail is not None:
+            dirty = QRectF(brush.logical_rect(self._live_tail[1], self._live_tail[0]))
+        dabs = []
+        while self._dab_done <= n - 3:
+            dabs.extend(self._dab.segment(self._dab_done))
+            self._dab_done += 1
+        if dabs:
+            self._add_live_dabs(dabs)
+            dirty = dirty.united(QRectF(dab.dab_bounds(dabs)))
+        self._live_tail = None
+        if n >= 2:
+            tail = self._dab.clone().segment(n - 2)
+            self._live_tail = dab.render_dabs(stroke, tail, self._canvas_dpr())
+            if self._live_tail is not None:
+                dirty = dirty.united(QRectF(brush.logical_rect(self._live_tail[1], self._live_tail[0])))
+        if not dirty.isEmpty():
+            self._update_doc_rect(dirty)
+
+    def _finish_live_dabs(self, stroke):
+        """Without a taper the final render is the live layer plus the last
+        segment, so finish that and hand it to the layer cache instead of
+        re-stamping the whole stroke on pen-up."""
+        n = len(stroke.points)
+        dabs = []
+        while self._dab_done <= n - 2:
+            dabs.extend(self._dab.segment(self._dab_done))
+            self._dab_done += 1
+        if dabs:
+            self._add_live_dabs(dabs)
+        if self._live_layer is not None:
+            dab.layer_cache.put(stroke, self._canvas_dpr(), (self._live_layer, self._live_layer_origin))
+
+    def _paint_live(self, painter):
+        """The live layer plus the provisional tail. Where they overlap they
+        are flattened together first, so a translucent stroke doesn't
+        double up at the joint."""
+        tail = self._live_tail
+        if tail is None:
+            if self._live_layer is not None:
+                painter.drawPixmap(self._live_layer_origin, self._live_layer)
+            return
+        tpix, torigin = tail
+        if self._live_layer is None:
+            painter.drawPixmap(torigin, tpix)
+            return
+        trect = brush.logical_rect(torigin, tpix)
+        lrect = brush.logical_rect(self._live_layer_origin, self._live_layer)
+        merged = brush.new_layer(trect.size(), self._canvas_dpr())
+        p = QPainter(merged)
+        try:
+            p.drawPixmap(self._live_layer_origin - trect.topLeft(), self._live_layer)
+            p.drawPixmap(0, 0, tpix)
+        finally:
+            p.end()
+        painter.save()
+        painter.setClipRegion(QRegion(lrect).subtracted(QRegion(trect)), Qt.ClipOperation.IntersectClip)
+        painter.drawPixmap(self._live_layer_origin, self._live_layer)
+        painter.restore()
+        painter.drawPixmap(trect.topLeft(), merged)
+
+    def _merge_live(self, new_pixmap, new_origin):
+        """Composite a freshly rendered piece onto the live stroke layer,
+        growing the layer when the piece falls outside it."""
+        dpr = self._canvas_dpr()
+        new_rect = brush.logical_rect(new_origin, new_pixmap)
+        if self._live_layer is None:
+            self._live_layer, self._live_layer_origin = new_pixmap, new_origin
+            return
+        old_rect = brush.logical_rect(self._live_layer_origin, self._live_layer)
+        if old_rect.contains(new_rect):
+            painter = QPainter(self._live_layer)
+            try:
+                painter.drawPixmap(new_origin - self._live_layer_origin, new_pixmap)
+            finally:
+                painter.end()
+        else:
+            union = old_rect.united(new_rect)
+            merged = brush.new_layer(union.size(), dpr)
+            painter = QPainter(merged)
+            try:
+                painter.drawPixmap(old_rect.topLeft() - union.topLeft(), self._live_layer)
+                painter.drawPixmap(new_rect.topLeft() - union.topLeft(), new_pixmap)
+            finally:
+                painter.end()
+            self._live_layer, self._live_layer_origin = merged, union.topLeft()
+
     def _extend_live_layer(self):
+        if self.current.brush is not None:
+            self._extend_live_dabs()
+            return
         stroke = self.current
         points = stroke.points
         n = len(points)
@@ -2170,6 +2382,9 @@ class Overlay(QWidget):
     def _end_stroke(self):
         if self.current:
             finished = self.current
+            if (finished.brush is not None and self._dab is not None and len(finished.points) > 1
+                    and not finished.brush.taper):
+                self._finish_live_dabs(finished)
             shape_rect = self._shape_dirty_rect()
             self._shape_raw_end = None
             if finished.shape is not None and brush.shape_is_degenerate(finished, 2.0 / self._view_scale()):
@@ -2177,6 +2392,8 @@ class Overlay(QWidget):
                 finished.points = []
             self.current = None
             self.lazy_pos = None
+            self._dab = None
+            self._live_tail = None
             self._live_layer = None
             self._live_layer_origin = None
             self._live_baked_index = 0
@@ -2245,6 +2462,7 @@ class Overlay(QWidget):
         if key in self._no_pressure_devices:
             return C.DEFAULT_PRESSURE
         dev = event.pointingDevice()
+        self._input_has_pressure = False
         if dev is not None and not (dev.capabilities() & QInputDevice.Capability.Pressure):
             self._mark_no_pressure(key, "driver reports no pressure capability")
             return C.DEFAULT_PRESSURE
@@ -2258,6 +2476,7 @@ class Overlay(QWidget):
                     return C.DEFAULT_PRESSURE
             else:
                 self._zero_pressure_run = 0
+        self._input_has_pressure = True
         return max(0.01, raw)
 
     def _mark_no_pressure(self, key, why):
@@ -2377,6 +2596,7 @@ class Overlay(QWidget):
                 if self._annotation_press(self._to_doc(pos), event.modifiers()):
                     event.accept()
                     return
+                self._input_has_pressure = False
                 self._begin_stroke(self._to_doc(pos), 0.65)
                 event.accept()
         except Exception:
@@ -2435,7 +2655,7 @@ class Overlay(QWidget):
     def _dirty_margin(self):
         # Generously covers stroke width, the brush-size cursor ring, and
         # the smoothing guide line so a dirty rect never clips live drawing.
-        return self.brush_size * 1.6 + 12
+        return max(self.brush_size, self.eraser_size) * 1.6 + 12
 
     def _mark_dirty(self, *points):
         # Points are in stroke coordinates; repaint where they show.
@@ -2463,28 +2683,20 @@ class Overlay(QWidget):
                 painter.drawPixmap(origin, pixmap)
                 painter.restore()
             return
-        segments = brush.stroke_segments(stroke)
-        if not segments:
-            return
-
-        if stroke.eraser:
-            # CompositionMode_Clear sets destination alpha to 0, which is
-            # idempotent, so overlapping segments never build up. No
-            # opaque-layer step needed.
-            painter.save()
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-            brush.paint_segments(painter, segments, QColor(0, 0, 0, 255))
-            painter.restore()
-            return
-
-        # Flatten the stroke to an opaque offscreen layer, then blend that
-        # onto the target once at stroke.opacity. Blending each segment
-        # separately would double up wherever the stroke overlaps itself.
-        layer = brush.render_stroke_layer(stroke, segments, self._canvas_dpr())
+        # Either engine flattens the stroke on its own layer (cached for dab
+        # strokes), blended once at stroke.opacity so it never doubles up
+        # where it overlaps itself. An eraser's layer is its coverage mask,
+        # removed from what is below with DestinationOut.
+        layer = dab.freehand_layer(stroke, self._canvas_dpr())
         if layer is None:
             return
         pixmap, origin = layer
+        if stroke.eraser:
+            painter.save()
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationOut)
+            painter.drawPixmap(origin, pixmap)
+            painter.restore()
+            return
         painter.save()
         painter.setOpacity(max(0.01, min(1.0, stroke.opacity)))
         painter.drawPixmap(origin, pixmap)
@@ -2640,19 +2852,12 @@ class Overlay(QWidget):
         parts where they are now, so this eraser must not also clear them
         where it was drawn. Exact under antialiasing: Clear left
         dst * (1 - coverage), and this adds annotation * coverage."""
-        segments = brush.stroke_segments(eraser)
-        if not segments:
-            return
-        bounds = brush.segment_bounds(segments)
         dpr = self._canvas_dpr()
-        mask = brush.new_layer(bounds.size(), dpr)
-        p = QPainter(mask)
-        try:
-            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            p.translate(-QPointF(bounds.topLeft()))
-            brush.paint_segments(p, segments, QColor(0, 0, 0, 255))
-        finally:
-            p.end()
+        found = dab.freehand_layer(eraser, dpr)
+        if found is None:
+            return
+        mask, origin = found
+        bounds = brush.logical_rect(origin, mask)
         layer = brush.new_layer(bounds.size(), dpr)
         p = QPainter(layer)
         try:
@@ -2714,7 +2919,8 @@ class Overlay(QWidget):
                     painter.setClipRect(self.drawable_rect())
 
             live_eraser = (
-                self.current is not None and self.current.eraser and self._live_layer is not None
+                self.current is not None and self.current.eraser
+                and (self._live_layer is not None or self._live_tail is not None)
             )
             if live_eraser:
                 # The live eraser preview should reveal the backdrop through
@@ -2736,19 +2942,19 @@ class Overlay(QWidget):
                     tp.translate(-dirty.topLeft())
                     tp.drawPixmap(self._canvas_origin, self._canvas)
                     tp.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationOut)
-                    tp.drawPixmap(self._live_layer_origin, self._live_layer)
+                    self._paint_live(tp)
                 finally:
                     tp.end()
                 painter.drawPixmap(dirty.topLeft(), temp)
             else:
                 painter.drawPixmap(self._canvas_origin, self._canvas)
-                if self.current and self._live_layer is not None:
+                if self.current and (self._live_layer is not None or self._live_tail is not None):
                     # Brush preview: SourceOver only adds color on top, so
                     # it can't reach through to the backdrop the way the
                     # eraser does. No buffer needed.
                     painter.save()
                     painter.setOpacity(max(0.01, min(1.0, self.current.opacity)))
-                    painter.drawPixmap(self._live_layer_origin, self._live_layer)
+                    self._paint_live(painter)
                     painter.restore()
 
             if self._floating is not None:
@@ -2775,7 +2981,10 @@ class Overlay(QWidget):
                 # Ring and guide in window coordinates, at on-screen size.
                 cursor_view = self._to_view(self.cursor_pos)
                 lazy_view = self._to_view(self.lazy_pos) if self.lazy_pos else None
-                d = brush.width_for(self.brush_size, self._last_effective_pressure)
+                d = self._ring_diameter()
+                if (time.monotonic() < self._size_preview_until and self.current is None
+                        and self.mode in ("brush", "eraser")):
+                    self._paint_size_preview(painter, cursor_view, d)
                 if self.mode == "eraser":
                     ring_color = QColor(255, 255, 255, 210)
                 else:
@@ -2790,6 +2999,37 @@ class Overlay(QWidget):
                 painter.restore()
         finally:
             painter.end()
+
+    def _ring_diameter(self):
+        """On-screen diameter of the brush ring: the dab under the pen while
+        drawing, full pressure while hovering."""
+        size = self._active_size()
+        stroke = self.current
+        if stroke is not None and stroke.brush is not None:
+            return dab.diameter(dab.preset_for(stroke.brush), size, self._dab_pressure)
+        if self.brush_preset == dab.CLASSIC or self.mode in SHAPES:
+            return brush.width_for(size, self._last_effective_pressure)
+        return size
+
+    def _paint_size_preview(self, painter, center, d):
+        """The brush as it will paint: its real stamp at full pressure."""
+        painter.save()
+        if self.brush_preset == dab.CLASSIC or self.mode == "eraser":
+            fill = QColor(255, 255, 255, 120) if self.mode == "eraser" else QColor(self.color)
+            if self.mode != "eraser":
+                fill.setAlpha(int(255 * self.opacity))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(fill)
+            painter.drawEllipse(center, d / 2, d / 2)
+        else:
+            spec = self._brush_spec(False, False)
+            probe = Stroke(self.color, d, self.opacity)
+            probe.brush = spec
+            probe.points = [(QPointF(center), 1.0)]
+            dabs = [(center.x(), center.y(), d, 1.0, 0)]
+            painter.setOpacity(self.opacity)
+            dab.paint_dabs(painter, probe, dabs, self._window_dpr())
+        painter.restore()
 
     def _paint_region_frame(self, painter, rect, selecting=False):
         # Dashed light-on-dark outline, visible over any content. Not part of
