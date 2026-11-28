@@ -7,6 +7,7 @@ the same glyph can be recolored for hover/checked/disabled states.
 """
 
 import math
+from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
@@ -360,9 +361,58 @@ _GLYPHS = {
 }
 
 
+# Lucide (https://lucide.dev, ISC; see lucide/LICENSE.txt): one consistent
+# 24 px outline icon set. Vendored SVGs from lucide-static 0.460.0, only the
+# ones used. Glyphs drawn above remain for anything Lucide doesn't cover
+# (backdrop off, hide to tray) and as a fallback.
+LUCIDE_DIR = Path(__file__).resolve().parent / "lucide"
+LUCIDE = {
+    "select": "mouse-pointer-2", "brush": "brush", "eraser": "eraser", "text": "type",
+    "rect": "square", "ellipse": "circle", "line": "slash", "arrow": "move-up-right",
+    "eyedropper": "pipette", "undo": "undo-2", "redo": "redo-2", "more": "ellipsis",
+    "bold": "bold", "align_left": "align-left", "align_center": "align-center", "align_right": "align-right",
+    "snapshot": "camera", "pass_through": "mouse-pointer-click", "hide_ui": "eye-off", "monitor": "monitor",
+    "region": "scan", "margin": "sliders-horizontal", "folder": "folder-open", "clear": "trash-2",
+    "exit": "x", "hide": "chevron-down",
+}
+LUCIDE_STROKE = 1.75  # a touch lighter than Lucide's 2, for 20 px on a dark bar
+_svg_cache = {}
+
+
+def _lucide_pixmap(file, color, size, dpr):
+    from PySide6.QtCore import QByteArray
+    from PySide6.QtSvg import QSvgRenderer
+    key = (file, color, size, dpr)
+    pm = _svg_cache.get(key)
+    if pm is not None:
+        return pm
+    svg = (LUCIDE_DIR / f"{file}.svg").read_text(encoding="utf-8")
+    svg = svg.replace("currentColor", QColor(color).name()).replace(
+        'stroke-width="2"', f'stroke-width="{LUCIDE_STROKE}"')
+    renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    pm = QPixmap(round(size * dpr), round(size * dpr))
+    pm.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    renderer.render(painter)
+    painter.end()
+    pm.setDevicePixelRatio(dpr)
+    _svg_cache[key] = pm
+    return pm
+
+
 def build_icon(name, color="#eeeeef", size=SIZE):
+    file = LUCIDE.get(name)
+    if file and (LUCIDE_DIR / f"{file}.svg").exists():
+        try:
+            icon = QIcon()
+            for dpr in (1.0, 2.0, 3.0):   # crisp at any monitor scale
+                icon.addPixmap(_lucide_pixmap(file, color, size, dpr))
+            return icon
+        except Exception:
+            pass
     pixmap, painter = _canvas(size)
-    _GLYPHS[name](painter, color, size)
+    _GLYPHS.get(name, more_glyph)(painter, color, size)
     return _finish(pixmap, painter)
 
 

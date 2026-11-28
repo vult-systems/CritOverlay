@@ -123,6 +123,7 @@ class AppConfig:
             "brush_tuning": tuning,
             "pressure_curve": self._pick("brush/pressure_curve", "normal", tuple(C.PRESSURE_CURVES)),
             "eraser_style": self._pick("brush/eraser_style", "hard", C.ERASER_STYLES),
+            "eraser_opacity": _clamp(self._value("brush/eraser_opacity", 1.0, float), 0.05, 1.0),
         }
 
     def _pick(self, key, default, allowed):
@@ -160,7 +161,7 @@ class AppConfig:
              margin_color=C.DEFAULT_MARGIN_COLOR, margin_opacity=C.DEFAULT_MARGIN_OPACITY,
              text_family=None, text_size=C.DEFAULT_TEXT_SIZE, text_bold=False, text_align="left",
              eraser_size=None, brush_preset=None, brush_tuning=None, pressure_curve=None,
-             eraser_style=None):
+             eraser_style=None, eraser_opacity=None):
         self._settings.setValue("brush/color", QColor(color).name())
         self._settings.setValue("brush/size", round(float(size), 2))
         if eraser_size is not None:
@@ -171,6 +172,8 @@ class AppConfig:
             self._settings.setValue("brush/pressure_curve", pressure_curve)
         if eraser_style:
             self._settings.setValue("brush/eraser_style", eraser_style)
+        if eraser_opacity is not None:
+            self._settings.setValue("brush/eraser_opacity", float(eraser_opacity))
         for key, (h, s) in (brush_tuning or {}).items():
             self._settings.setValue(f"brush/{key}_hardness", round(float(h), 3))
             self._settings.setValue(f"brush/{key}_spacing", round(float(s), 3))

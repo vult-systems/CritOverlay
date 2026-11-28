@@ -24,6 +24,7 @@ from PySide6.QtGui import QGuiApplication, QMouseEvent
 from . import app as app_module
 from . import constants as C
 from . import dab
+from . import icons
 from . import mypaint_engine
 from . import diagnostics
 from . import hotkeys
@@ -126,6 +127,8 @@ def _run_checks(app, overlay, opts, results):
 
     _toolbar_checks(overlay, results)
     _brush_engine_checks(overlay, results)
+    missing = [f for f in icons.LUCIDE.values() if not (icons.LUCIDE_DIR / f"{f}.svg").exists()]
+    results.check("Toolbar icons bundled (Lucide)", not missing, ", ".join(missing) or str(icons.LUCIDE_DIR))
 
     screen = QGuiApplication.primaryScreen()
     grab = screen.grabWindow(0, 0, 0, 4, 4)
@@ -210,8 +213,8 @@ def _toolbar_checks(overlay, results):
     results.check("Clicking the toolbar doesn't draw", len(overlay.history) == 0 and overlay.current is None)
 
     total = len(QGuiApplication.screens())
-    results.check("Monitor button shown only with more than one monitor",
-                  overlay.monitor_btn.isVisibleTo(overlay.panel) == (total > 1), f"{total} monitor(s)")
+    results.check("Next-monitor item shown only with more than one monitor",
+                  overlay.monitor_btn.isVisibleTo(overlay.more_menu) == (total > 1), f"{total} monitor(s)")
 
 
 def _on_covered_monitor(overlay, widget_rect_global):

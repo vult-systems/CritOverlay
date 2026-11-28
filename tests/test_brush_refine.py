@@ -159,7 +159,7 @@ class OverlayRefineTests(CaptureCase):
         recommended = [k for _p, k, _l, rec in brush_popup.entries() if rec]
         for key in recommended:
             self.assertTrue(popup.buttons[key].font().bold())
-        popup.pressure_buttons["soft"].click()
+        o.pressure_buttons["soft"].click()  # in the More menu now
         self.assertEqual(o.pressure_curve, "soft")
         popup.buttons["soft"].click()
         self.assertTrue(popup.tuning.isHidden(), "fine-tune is opt-in")

@@ -286,6 +286,7 @@ def render_shape_layer(stroke, dpr=1.0):
                     continue
                 painter.save()
                 painter.setTransform(transform, True)
+                painter.setOpacity(max(0.01, min(1.0, eraser.opacity)))
                 painter.drawPixmap(found[1], found[0])
                 painter.restore()
     finally:

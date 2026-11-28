@@ -75,21 +75,37 @@ MIN_POINT_SPACING = 0.6
 TABLET_MOUSE_GUARD_S = 0.35
 
 PANEL_MARGIN_TOP = 16
+ICON_SIZE = 20
 TOAST_GAP = 10
 TOAST_DURATION_MS = 1600
 STARTUP_HINT_MS = 3200
 
 TOOLBAR_STYLE = f"""
+    QFrame#Toolbar, QFrame#Toolbar QWidget {{
+        font-family: "Segoe UI", "IBM Plex Sans";
+        font-size: 12px;
+    }}
     QFrame#Toolbar {{
         background: rgba(20,20,23,240);
         border: 1px solid rgba(255,255,255,20);
         border-radius: 14px;
     }}
     QToolButton {{
+        color: #e6e6e8;
         background: transparent;
         border: 1px solid transparent;
-        border-radius: 9px;
-        padding: 5px;
+        border-radius: 8px;
+        padding: 6px;
+    }}
+    QToolButton#Chip {{
+        border: 1px solid rgba(255,255,255,34);
+        padding: 4px 10px;
+        font-weight: 600;
+    }}
+    QLabel#Hint {{
+        color: #9a9aa1;
+        font-size: 11px;
+        padding: 0 4px;
     }}
     QToolButton:hover {{
         background: rgba(255,255,255,24);
@@ -120,11 +136,14 @@ TOOLBAR_STYLE = f"""
         background: {ACCENT};
         border-radius: 1px;
     }}
+    QSlider {{
+        min-height: 24px;   /* a comfortable target for a pen */
+    }}
     QSlider::handle:horizontal {{
-        width: 12px;
-        height: 12px;
-        margin: -5px 0;
-        border-radius: 6px;
+        width: 14px;
+        height: 14px;
+        margin: -6px 0;
+        border-radius: 7px;
         background: #f2f2f3;
     }}
     QFrame#Sep {{
@@ -145,6 +164,23 @@ TOOLBAR_STYLE = f"""
     QLabel#SliderCaption:disabled, QLabel#SliderValue:disabled {{
         color: #55555b;
     }}
+"""
+
+# Numeric fields and the font list in the context bar and menus.
+FIELD_STYLE = """
+    QAbstractSpinBox {
+        color: #eeeeef;
+        background: rgba(255,255,255,12);
+        border: 1px solid rgba(255,255,255,26);
+        border-radius: 6px;
+        padding: 2px 6px;
+        min-height: 22px;
+        selection-background-color: #3a3a40;
+    }
+    QAbstractSpinBox:focus { border: 1px solid rgba(255,255,255,70); }
+    QComboBox { color: #eeeeef; background: rgba(255,255,255,12); border: 1px solid rgba(255,255,255,26);
+                border-radius: 6px; padding: 3px 8px; min-width: 120px; min-height: 22px; }
+    QComboBox QAbstractItemView { color: #eeeeef; background: #1c1c1f; selection-background-color: #3a3a40; }
 """
 
 TOAST_STYLE = """

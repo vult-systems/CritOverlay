@@ -114,7 +114,7 @@ class MigrationTests(unittest.TestCase):
             # Brush engine prototype: also new, so defaults.
             "brush_preset": dab.DEFAULT_PRESET, "eraser_size": C.DEFAULT_ERASER_SIZE,
             "brush_tuning": {k: (p.hardness, p.spacing) for k, p in dab.PRESETS.items()},
-            "pressure_curve": "normal", "eraser_style": "hard",
+            "pressure_curve": "normal", "eraser_style": "hard", "eraser_opacity": 1.0,
         })
         q = QSettings(str(self.path), QSettings.Format.IniFormat)
         self.assertEqual(int(q.value("meta/settings_version")), SETTINGS_VERSION)

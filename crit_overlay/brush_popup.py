@@ -4,7 +4,8 @@ while that tool is active.
 Brushes are grouped by what they are for. The first brush in each row is
 the recommended one (the candidate final set); the others stay available
 while the engines are being compared. Which engine draws a brush is only in
-its tooltip. Pressure response applies to every brush.
+its tooltip. Pressure response and the stabilizer apply to every brush and
+live in the More menu.
 """
 
 from PySide6.QtCore import Qt
@@ -81,45 +82,66 @@ def _button(parent, text, tooltip, slot):
 
 
 class BrushPopup(QFrame):
+    """The recommended five brushes up front, by purpose; the alternatives
+    still being compared below them; hardness and spacing behind
+    Fine-tune."""
+
     def __init__(self, overlay):
         super().__init__(None, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
         self._overlay = overlay
         self.setObjectName("Toolbar")
-        self.setStyleSheet(C.TOOLBAR_STYLE)
+        self.setStyleSheet(C.TOOLBAR_STYLE + """
+            QToolButton#Featured { padding: 6px 10px; min-width: 76px; min-height: 40px; }
+        """)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(6, 6, 6, 6)
-        outer.setSpacing(3)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(4)
         self.buttons = {}
-        rows = {}
-        for purpose, key, label, recommended in entries():
-            if purpose not in rows:
-                rows[purpose] = _row(self, purpose)
-                outer.addLayout(rows[purpose])
-            tip = f"{label}{' (recommended)' if recommended else ''}. Engine: {_engine(key)}"
-            btn = _button(self, label, tip, lambda checked=False, k=key: self._pick(k))
-            if recommended:
-                f = QFont(btn.font())
-                f.setBold(True)
-                btn.setFont(f)
-            rows[purpose].addWidget(btn)
-            self.buttons[key] = btn
-        for row in rows.values():
-            row.addStretch(1)
+        items = entries()
 
-        prow = _row(self, "Pressure")
-        self.pressure_buttons = {}
-        for name in C.PRESSURE_CURVES:
-            btn = _button(self, name.capitalize(),
-                          {"soft": "Full strength with a light touch", "normal": "Linear",
-                           "firm": "Needs more force for full strength"}[name],
-                          lambda checked=False, n=name: self._pick_curve(n))
-            prow.addWidget(btn)
-            self.pressure_buttons[name] = btn
-        prow.addStretch(1)
+        cap = QLabel("BRUSHES", self)
+        cap.setObjectName("SliderCaption")
+        outer.addWidget(cap)
+        featured = QHBoxLayout()
+        featured.setSpacing(4)
+        for purpose, key, label, recommended in items:
+            if not recommended:
+                continue
+            tip = f"{purpose}: {label}. Engine: {_engine(key)}"
+            btn = _button(self, purpose + chr(10) + label, tip, lambda checked=False, k=key: self._pick(k))
+            btn.setObjectName("Featured")
+            f = QFont(btn.font())
+            f.setBold(True)
+            btn.setFont(f)
+            featured.addWidget(btn)
+            self.buttons[key] = btn
+        featured.addStretch(1)
+        outer.addLayout(featured)
+
+        others = [(p, k, label) for p, k, label, rec in items if not rec]
+        if others:
+            cap = QLabel("MORE BRUSHES (EVALUATION)", self)
+            cap.setObjectName("SliderCaption")
+            outer.addSpacing(4)
+            outer.addWidget(cap)
+            rows = {}
+            for purpose, key, label in others:
+                if purpose not in rows:
+                    rows[purpose] = _row(self, purpose)
+                    outer.addLayout(rows[purpose])
+                btn = _button(self, label, f"{purpose}: {label}. Engine: {_engine(key)}",
+                              lambda checked=False, k=key: self._pick(k))
+                rows[purpose].addWidget(btn)
+                self.buttons[key] = btn
+            for row in rows.values():
+                row.addStretch(1)
+
+        frow = QHBoxLayout()
+        frow.addStretch(1)
         self.fine_btn = _button(self, "Fine-tune", "Hardness and spacing for this brush", self._toggle_fine)
-        prow.addWidget(self.fine_btn)
-        outer.addLayout(prow)
+        frow.addWidget(self.fine_btn)
+        outer.addLayout(frow)
 
         self.tuning = QWidget(self)
         tl = QVBoxLayout(self.tuning)
@@ -156,10 +178,6 @@ class BrushPopup(QFrame):
         self._overlay._set_brush_preset(key)
         self.sync()
 
-    def _pick_curve(self, name):
-        self._overlay._set_pressure_curve(name)
-        self.sync()
-
     def _toggle_fine(self):
         self.sync()
 
@@ -175,8 +193,6 @@ class BrushPopup(QFrame):
         key = self._overlay.brush_preset
         for k, btn in self.buttons.items():
             btn.setChecked(k == key)
-        for name, btn in self.pressure_buttons.items():
-            btn.setChecked(name == self._overlay.pressure_curve)
         tunable = key in dab.PRESETS
         self.fine_btn.setEnabled(tunable)
         self.tuning.setVisible(tunable and self.fine_btn.isChecked())

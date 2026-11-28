@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QSlider,
     QToolButton,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -52,6 +53,7 @@ from .pass_through_badge import PassThroughBadge
 from .region_popup import RegionPopup
 from .shape_popup import SHAPE_LABELS, ShapePopup
 from .text_edit import TextEditor
+from .ui_widgets import IntField, SizeField
 
 logger = logging.getLogger(f"{C.ORG_NAME}.overlay")
 
@@ -70,6 +72,7 @@ _ZERO_PRESSURE_EVENTS = 6
 
 class Overlay(QWidget):
     status_changed = Signal(str)
+    autostart_toggled = Signal(bool)
     # Emitted when Esc or the toolbar hides the overlay to the tray, so the
     # tray can say once where it went.
     hidden_to_tray = Signal()
@@ -173,6 +176,7 @@ class Overlay(QWidget):
         self._input_has_pressure = False
         self._size_preview_until = 0.0
         self.pressure_curve = saved["pressure_curve"]
+        self.eraser_opacity = saved["eraser_opacity"]
         self.eraser_style = saved["eraser_style"]
         self._eraser_popup = None
         self._tilt = (0.0, 0.0)      # last pen tilt, libmypaint units
@@ -257,8 +261,10 @@ class Overlay(QWidget):
 
         self._color_popup = None
         text_fonts.load()
+        self._ui_hidden = False
         self.panel = self._build_panel()
-        self.text_bar = self._build_text_bar()
+        self.props_bar = self._build_props_bar()
+        self.more_menu = self._build_more_menu()
         self.panel.installEventFilter(self)
         self._refresh_monitor_button()
         self.panel.adjustSize()
@@ -542,12 +548,12 @@ class Overlay(QWidget):
         panel_y = local.y() + C.PANEL_MARGIN_TOP
         self.panel.move(panel_x, panel_y)
         below = panel_y + self.panel.height()
-        text_bar = getattr(self, "text_bar", None)
-        if text_bar is not None:
-            text_bar.adjustSize()
-            text_bar.move(panel_x + (self.panel.width() - text_bar.width()) // 2, below + 6)
-            if not text_bar.isHidden():
-                below = text_bar.y() + text_bar.height()
+        bar = getattr(self, "props_bar", None)
+        if bar is not None:
+            bar.adjustSize()
+            bar.move(local.x() + max(16, (local.width() - bar.width()) // 2), below + 6)
+            if not bar.isHidden():
+                below = bar.y() + bar.height()
         self._toast_anchor = (local, below + C.TOAST_GAP)
         if self.toast_label.isVisible():
             self._position_toast()
@@ -635,140 +641,169 @@ class Overlay(QWidget):
         self.hover_tip.show()
         self.hover_tip.raise_()
 
+    # -- chrome: primary toolbar, context bar, More menu ---------------------
+    #
+    # The toolbar holds only the tools and undo/redo. What a tool needs
+    # (size, opacity, color, its own options) is in the context bar under it,
+    # which shows only the properties of the current tool or selection.
+    # Everything else (capture, backdrop, monitor, pressure, stabilizer,
+    # startup) lives in the More menu. Tab hides both bars.
+
+    def _tool_button(self, parent, icon_name, tooltip, checkable=False, layout=None):
+        btn = QToolButton(parent)
+        btn.setIcon(icons.build_icon(icon_name))
+        btn.setIconSize(QSize(C.ICON_SIZE, C.ICON_SIZE))
+        btn.setCheckable(checkable)
+        btn.setAutoRaise(True)
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._hoverable(btn, tooltip)
+        if layout is not None:
+            layout.addWidget(btn)
+        return btn
+
+    @staticmethod
+    def _separator(parent, layout):
+        line = QFrame(parent)
+        line.setObjectName("Sep")
+        line.setFixedWidth(1)
+        line.setFixedHeight(22)
+        layout.addWidget(line)
+
     def _build_panel(self):
         panel = QFrame(self)
         panel.setObjectName("Toolbar")
         panel.setStyleSheet(C.TOOLBAR_STYLE)
         layout = QHBoxLayout(panel)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(4)
+        layout.setContentsMargins(6, 5, 6, 5)
+        layout.setSpacing(2)
 
-        def sep():
-            line = QFrame(panel)
-            line.setObjectName("Sep")
-            line.setFixedWidth(1)
-            line.setFixedHeight(26)
-            layout.addWidget(line)
+        def tool(icon_name, tooltip, checkable=False):
+            return self._tool_button(panel, icon_name, tooltip, checkable, layout)
 
-        def tool_button(icon_name, tooltip, checkable=False):
-            btn = QToolButton(panel)
-            btn.setIcon(icons.build_icon(icon_name))
-            btn.setIconSize(QSize(20, 20))
-            btn.setCheckable(checkable)
-            btn.setAutoRaise(True)
-            self._hoverable(btn, tooltip)
-            layout.addWidget(btn)
-            return btn
-
-        self.select_btn = tool_button("select", "Select and move (V)", checkable=True)
+        self.select_btn = tool("select", "Select and move (V)", True)
+        self.brush_btn = tool("brush", "Brush (B). Click again to choose a brush", True)
+        self.eraser_btn = tool("eraser", "Eraser (E). Click again for hard or soft", True)
+        self.shape_btn = tool(self._last_shape, "Shapes (U cycles). Click again to choose", True)
+        self.text_btn = tool("text", "Text (T). Ctrl+Enter commits, Esc cancels", True)
+        self.eyedropper_btn = tool("eyedropper", "Eyedropper (I, or Alt+click while drawing)", True)
         self.select_btn.clicked.connect(lambda: self._set_mode("select"))
-        self.brush_btn = tool_button("brush", "Brush (B). Click again for presets", checkable=True)
-        self.eraser_btn = tool_button("eraser", "Eraser (E)", checkable=True)
-        self.eyedropper_btn = tool_button("eyedropper", "Eyedropper (Alt+click)", checkable=True)
-        self.brush_btn.setChecked(self.mode == "brush")
-        self.eraser_btn.setChecked(self.mode == "eraser")
-        self.eyedropper_btn.setChecked(self.mode == "eyedropper")
         self.brush_btn.clicked.connect(self._on_brush_button)
         self.eraser_btn.clicked.connect(self._on_eraser_button)
-        self.eyedropper_btn.clicked.connect(self._toggle_eyedropper)
-        # One button for all shapes keeps the toolbar compact: it selects
-        # the last used shape, and a click while a shape is active opens
-        # the picker.
-        self.shape_btn = tool_button(self._last_shape, "Shapes (U). Click again to choose", checkable=True)
         self.shape_btn.clicked.connect(self._on_shape_button)
-        self.text_btn = tool_button("text", "Text (T). Ctrl+Enter commits, Esc cancels", checkable=True)
         self.text_btn.clicked.connect(lambda: self._set_mode("text"))
+        self.eyedropper_btn.clicked.connect(self._toggle_eyedropper)
+        for btn, mode in ((self.select_btn, "select"), (self.brush_btn, "brush"), (self.eraser_btn, "eraser"),
+                          (self.text_btn, "text"), (self.eyedropper_btn, "eyedropper")):
+            btn.setChecked(self.mode == mode)
+        self.shape_btn.setChecked(self.mode in SHAPES)
 
-        sep()
-
-        self.color_btn = QToolButton(panel)
-        self.color_btn.setIcon(icons.build_color_swatch_icon(self.color.name()))
-        self.color_btn.setIconSize(QSize(20, 20))
-        self.color_btn.setAutoRaise(True)
-        self.color_btn.clicked.connect(self._show_color_popup)
-        self._hoverable(self.color_btn, "Brush color")
-        layout.addWidget(self.color_btn)
-
-        self.backdrop_btn = QToolButton(panel)
-        self.backdrop_btn.setIcon(self._backdrop_icon(self.backdrop))
-        self.backdrop_btn.setIconSize(QSize(20, 20))
-        self.backdrop_btn.setAutoRaise(True)
-        self.backdrop_btn.clicked.connect(self._cycle_backdrop)
-        self._hoverable(self.backdrop_btn, f"Backdrop: {self._BACKDROP_LABEL[self.backdrop]} (click to cycle)")
-        layout.addWidget(self.backdrop_btn)
-
-        # Checked while a custom region is set; clicking opens the region
-        # and margin popup.
-        self.region_btn = tool_button("region", "Drawing region and margin (R to select)", checkable=True)
-        self.region_btn.clicked.connect(self._show_region_popup)
-
-        sep()
-
-        size_row, self.size_slider, self.size_value_label = self._build_slider_row(
-            panel, "SIZE", 0, dab.SIZE_STEPS, dab.size_to_slider(self.brush_size),
-            lambda v: dab.format_size(dab.slider_to_size(v)),
-            self._on_size_slider_changed, "Brush size ([ / ])"
-        )
-        layout.addWidget(size_row)
-
-        opacity_row, self.opacity_slider, self.opacity_value_label = self._build_slider_row(
-            panel, "OPACITY", 5, 100, int(self.opacity * 100), lambda v: f"{v}%",
-            self._on_opacity_slider_changed, "Stroke opacity"
-        )
-        layout.addWidget(opacity_row)
-
-        smoothing_row, self.smoothing_slider, self.smoothing_value_label = self._build_slider_row(
-            panel, "SMOOTH", 0, 90, int(self.smoothing * 100), lambda v: f"{v}%",
-            self._on_smoothing_slider_changed, "Stroke smoothing"
-        )
-        layout.addWidget(smoothing_row)
-
-        backdrop_opacity_row, self.backdrop_opacity_slider, self.backdrop_opacity_value_label = self._build_slider_row(
-            panel, "INTENSITY", 10, 100, int(self.backdrop_opacity * 100), lambda v: f"{v}%",
-            self._on_backdrop_opacity_slider_changed, "Backdrop intensity"
-        )
-        layout.addWidget(backdrop_opacity_row)
-
-        sep()
-
-        self.undo_btn = tool_button("undo", "Undo (Ctrl+Z)")
-        self.redo_btn = tool_button("redo", "Redo (Ctrl+Shift+Z)")
-        self.clear_btn = tool_button("clear", "Clear all")
+        self._separator(panel, layout)
+        self.undo_btn = tool("undo", "Undo (Ctrl+Z)")
+        self.redo_btn = tool("redo", "Redo (Ctrl+Shift+Z)")
         self.undo_btn.clicked.connect(self.undo)
         self.redo_btn.clicked.connect(self.redo)
-        self.clear_btn.clicked.connect(self.clear)
 
-        sep()
-
-        self.monitor_btn = tool_button("monitor", "Next monitor (F7)")
-        self.monitor_btn.clicked.connect(self.move_to_next_screen)
-        self.pass_btn = tool_button("pass_through", "Pass-through (F8)", checkable=True)
-        self.snap_btn = tool_button("snapshot", "Screenshot (F9)")
-        self.exit_btn = tool_button("exit", "Exit (Esc)")
-        self.pass_btn.clicked.connect(self.toggle_pass_through)
-        self.snap_btn.clicked.connect(self.capture_annotated)
-        self.exit_btn.clicked.connect(self.dismiss)
+        self._separator(panel, layout)
+        self.more_btn = tool("more", "More: screenshot, capture, backdrop, monitor, settings")
+        self.more_btn.clicked.connect(self._show_more_menu)
 
         panel.adjustSize()
         return panel
 
-    def _build_text_bar(self):
-        """Text options, shown under the toolbar only while the text tool is
-        active. Nothing here takes keyboard focus, so typing keeps going to
-        the text being edited."""
+    # -- context bar ----------------------------------------------------------
+
+    _PROPS = {
+        "brush": ("preset", "size", "opacity", "color"),
+        "eraser": ("eraser_style", "size", "opacity"),
+        "shape": ("shape_type", "size", "opacity", "color"),
+        "text": ("text", "text_size", "opacity", "color"),
+        "select_text": ("text", "text_size", "opacity", "color"),
+        "select_shape": ("size", "opacity", "color"),
+        "select_none": ("hint",),
+        "eyedropper": ("color", "hint"),
+    }
+    _HINTS = {
+        "select_none": "Click an annotation to select it. Drag to move, Delete removes",
+        "eyedropper": "Click anywhere to pick a color",
+    }
+
+    def _build_props_bar(self):
+        """The context bar. Nothing in it takes keyboard focus except the
+        numeric fields while you type in them, so typing text annotations
+        and tool shortcuts keep working."""
         bar = QFrame(self)
         bar.setObjectName("Toolbar")
-        bar.setStyleSheet(C.TOOLBAR_STYLE + """
-            QComboBox { color: #eeeeef; background: #2a2a2e; border: 1px solid #3a3a40;
-                        border-radius: 5px; padding: 2px 8px; min-width: 120px; }
-            QComboBox QAbstractItemView { color: #eeeeef; background: #1c1c1f;
-                                          selection-background-color: #3a3a40; }
-        """)
+        bar.setStyleSheet(C.TOOLBAR_STYLE + C.FIELD_STYLE)
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(10, 6, 10, 6)
-        layout.setSpacing(4)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(10)
+        sections = {}
 
-        self.font_combo = QComboBox(bar)
+        def section(name):
+            w = QWidget(bar)
+            h = QHBoxLayout(w)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(4)
+            layout.addWidget(w)
+            sections[name] = w
+            return w, h
+
+        def caption(parent, text):
+            label = QLabel(text, parent)
+            label.setObjectName("SliderCaption")
+            return label
+
+        def slider(parent, lo, hi, value, slot, width=96):
+            s = QSlider(Qt.Orientation.Horizontal, parent)
+            s.setRange(lo, hi)
+            s.setValue(value)
+            s.setFixedWidth(width)
+            s.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            s.valueChanged.connect(slot)
+            return s
+
+        def text_toggle(parent, text, tooltip):
+            b = QToolButton(parent)
+            b.setText(text)
+            b.setCheckable(True)
+            b.setAutoRaise(True)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            self._hoverable(b, tooltip)
+            return b
+
+        # Brush: which brush (opens the brush picker).
+        w, h = section("preset")
+        self.preset_btn = QToolButton(w)
+        self.preset_btn.setObjectName("Chip")
+        self.preset_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.preset_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.preset_btn.clicked.connect(lambda: self._show_brush_popup(self.preset_btn))
+        self._hoverable(self.preset_btn, "Choose a brush (or click the Brush tool again)")
+        h.addWidget(self.preset_btn)
+
+        # Eraser: hard or soft.
+        w, h = section("eraser_style")
+        self.eraser_style_btns = {}
+        for style, label, tip in (("hard", "Hard", "Hard eraser: clean, solid edge"),
+                                  ("soft", "Soft", "Soft eraser: feathered edge, light pressure erases partly")):
+            b = text_toggle(w, label, tip)
+            b.clicked.connect(lambda checked=False, s=style: self._set_eraser_style(s))
+            h.addWidget(b)
+            self.eraser_style_btns[style] = b
+
+        # Shapes: which shape.
+        w, h = section("shape_type")
+        self.shape_type_btns = {}
+        for shape in SHAPES:
+            b = self._tool_button(w, shape, f"{SHAPE_LABELS[shape]} (U cycles, Shift constrains)", True, h)
+            b.setIconSize(QSize(18, 18))
+            b.clicked.connect(lambda checked=False, s=shape: self._set_mode(s))
+            self.shape_type_btns[shape] = b
+
+        # Text: font, bold, alignment. This section is self.text_bar.
+        w, h = section("text")
+        self.font_combo = QComboBox(w)
         self.font_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         for i, family in enumerate(text_fonts.FAMILIES):
             self.font_combo.addItem(family)
@@ -776,53 +811,307 @@ class Overlay(QWidget):
         self.font_combo.setCurrentText(self.text_family)
         self.font_combo.currentTextChanged.connect(self._set_text_family)
         self._hoverable(self.font_combo, "Font")
-        layout.addWidget(self.font_combo)
-
-        size_row, self.text_size_slider, self.text_size_label = self._build_slider_row(
-            bar, "SIZE", C.MIN_TEXT_SIZE, C.MAX_TEXT_SIZE, self.text_size, lambda v: f"{v}px",
-            self._set_text_size, "Text size"
-        )
-        self.text_size_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        layout.addWidget(size_row)
-
-        def button(icon_name, tooltip):
-            btn = QToolButton(bar)
-            btn.setIcon(icons.build_icon(icon_name))
-            btn.setIconSize(QSize(18, 18))
-            btn.setCheckable(True)
-            btn.setAutoRaise(True)
-            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            self._hoverable(btn, tooltip)
-            layout.addWidget(btn)
-            return btn
-
-        self.bold_btn = button("bold", "Bold")
+        h.addWidget(self.font_combo)
+        self.bold_btn = self._tool_button(w, "bold", "Bold", True, h)
+        self.bold_btn.setIconSize(QSize(18, 18))
         self.bold_btn.setChecked(self.text_bold)
         self.bold_btn.clicked.connect(lambda checked: self._set_text_bold(checked))
         self.align_btns = {}
         for align in C.TEXT_ALIGNS:
-            btn = button(f"align_{align}", f"Align {align}")
-            btn.setChecked(align == self.text_align)
-            btn.clicked.connect(lambda checked=False, a=align: self._set_text_align(a))
-            self.align_btns[align] = btn
-        bar.adjustSize()
+            b = self._tool_button(w, f"align_{align}", f"Align {align}", True, h)
+            b.setIconSize(QSize(18, 18))
+            b.setChecked(align == self.text_align)
+            b.clicked.connect(lambda checked=False, a=align: self._set_text_align(a))
+            self.align_btns[align] = b
+        self.text_bar = w
+
+        # Size (brush, eraser, shape stroke width): logarithmic slider plus
+        # a field you can type into or scroll.
+        w, h = section("size")
+        self.size_caption = caption(w, "SIZE")
+        h.addWidget(self.size_caption)
+        self.size_slider = slider(w, 0, dab.SIZE_STEPS, dab.size_to_slider(self.brush_size),
+                                  self._on_size_slider_changed)
+        h.addWidget(self.size_slider)
+        self.size_value_label = SizeField(w)
+        self.size_value_label.setValue(self.brush_size)
+        self.size_value_label.valueChanged.connect(self._set_size)
+        self.size_value_label.editingFinished.connect(self._return_focus)
+        h.addWidget(self.size_value_label)
+        self._hoverable(w, "Size ([ and ] step). Type a value or scroll the field")
+
+        w, h = section("text_size")
+        h.addWidget(caption(w, "SIZE"))
+        self.text_size_slider = slider(w, C.MIN_TEXT_SIZE, C.MAX_TEXT_SIZE, self.text_size, self._set_text_size)
+        h.addWidget(self.text_size_slider)
+        self.text_size_label = IntField(C.MIN_TEXT_SIZE, C.MAX_TEXT_SIZE, "px", w)
+        self.text_size_label.setValue(self.text_size)
+        self.text_size_label.valueChanged.connect(self._set_text_size)
+        self.text_size_label.editingFinished.connect(self._return_focus)
+        h.addWidget(self.text_size_label)
+        self._hoverable(w, "Text size")
+
+        w, h = section("opacity")
+        h.addWidget(caption(w, "OPACITY"))
+        self.opacity_slider = slider(w, 5, 100, int(self.opacity * 100), self._on_opacity_slider_changed, 80)
+        h.addWidget(self.opacity_slider)
+        self.opacity_value_label = IntField(5, 100, "%", w, 46)
+        self.opacity_value_label.setValue(int(self.opacity * 100))
+        self.opacity_value_label.valueChanged.connect(self._set_opacity)
+        self.opacity_value_label.editingFinished.connect(self._return_focus)
+        h.addWidget(self.opacity_value_label)
+        self._hoverable(w, "Opacity")
+
+        w, h = section("color")
+        self.color_btn = QToolButton(w)
+        self.color_btn.setIcon(icons.build_color_swatch_icon(self.color.name()))
+        self.color_btn.setIconSize(QSize(C.ICON_SIZE, C.ICON_SIZE))
+        self.color_btn.setAutoRaise(True)
+        self.color_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.color_btn.clicked.connect(self._show_color_popup)
+        self._hoverable(self.color_btn, "Color (I or Alt+click picks from the screen)")
+        h.addWidget(self.color_btn)
+
+        w, h = section("hint")
+        self.props_hint = QLabel("", w)
+        self.props_hint.setObjectName("Hint")
+        h.addWidget(self.props_hint)
+
+        self._props_sections = sections
         bar.hide()
         return bar
 
+    def _return_focus(self):
+        # After typing in a field, keys go back to the canvas (tool
+        # shortcuts, text annotations).
+        self.setFocus()
+
+    def _props_context(self):
+        if self._text_edit is not None or self.mode == "text":
+            return "text"
+        if self.mode == "select":
+            s = self.selection
+            if s is None:
+                return "select_none"
+            return "select_text" if s.shape == "text" else "select_shape"
+        if self.mode in SHAPES:
+            return "shape"
+        return self.mode
+
     def _sync_text_bar(self):
-        bar = getattr(self, "text_bar", None)
+        """Show the context bar's sections for the current tool or
+        selection, and nothing while the toolbar is hidden on purpose
+        (Tab, screenshots, pass-through)."""
+        bar = getattr(self, "props_bar", None)
         if bar is None:
             return
-        # The toolbar counts as off only when hidden on purpose (screenshot,
-        # pass-through); before the first show every child reports hidden.
+        # The toolbar counts as off only when hidden on purpose; before the
+        # first show every child reports hidden.
         panel_off = self.panel.isHidden() and self.panel.testAttribute(Qt.WidgetAttribute.WA_WState_ExplicitShowHide)
-        text_selected = self.selection is not None and self.selection.shape == "text"
-        show = (self.mode == "text" or text_selected) and not panel_off
+        ctx = self._props_context()
+        wanted = set() if panel_off else set(self._PROPS.get(ctx, ()))
+        for name, w in self._props_sections.items():
+            w.setVisible(name in wanted)
+        if wanted:
+            self.preset_btn.setText(self._preset_label(self.brush_preset))
+            for style, b in self.eraser_style_btns.items():
+                b.setChecked(style == self.eraser_style)
+            for shape, b in self.shape_type_btns.items():
+                b.setChecked(shape == self.mode)
+            self.size_caption.setText("WIDTH" if ctx in ("shape", "select_shape") else "SIZE")
+            self.props_hint.setText(self._HINTS.get(ctx, ""))
+            self._sync_size_slider()
+            self._sync_opacity_slider()
+            self._sync_color_swatch()
+        show = bool(wanted)
+        bar.adjustSize()
         if show != (not bar.isHidden()):
             bar.setVisible(show)
             if show:
                 bar.raise_()
-            self._place_chrome()
+        self._place_chrome()
+
+    # -- More menu ------------------------------------------------------------
+
+    def _build_more_menu(self):
+        """Secondary controls in one popup: output and display actions
+        first, then capture, backdrop, drawing feel and app settings."""
+        menu = QFrame(None, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        menu.setObjectName("Toolbar")
+        menu.setStyleSheet(C.TOOLBAR_STYLE + C.FIELD_STYLE)
+        v = QVBoxLayout(menu)
+        v.setContentsMargins(8, 8, 8, 8)
+        v.setSpacing(4)
+
+        def heading(text):
+            label = QLabel(text, menu)
+            label.setObjectName("SliderCaption")
+            v.addSpacing(4)
+            v.addWidget(label)
+
+        def row():
+            h = QHBoxLayout()
+            h.setSpacing(4)
+            v.addLayout(h)
+            return h
+
+        def item(layout, icon_name, text, tooltip, slot, checkable=False, close=True):
+            b = QToolButton(menu)
+            if icon_name:
+                b.setIcon(icons.build_icon(icon_name))
+                b.setIconSize(QSize(18, 18))
+                b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            else:
+                b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            b.setText(text)
+            b.setCheckable(checkable)
+            b.setAutoRaise(True)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.setToolTip(tooltip)
+            if close:
+                # Close first: a screenshot or region selection must not
+                # see the menu, and other popups open from the toolbar.
+                def run(checked=False, slot=slot):
+                    if menu.isVisible():
+                        menu.close()
+                        QTimer.singleShot(0, slot)
+                    else:
+                        slot()
+                b.clicked.connect(run)
+            else:
+                b.clicked.connect(lambda checked=False: slot())
+            layout.addWidget(b)
+            return b
+
+        def slider_row(label, lo, hi, value, slot, tooltip):
+            h = row()
+            cap = QLabel(label, menu)
+            cap.setObjectName("SliderCaption")
+            cap.setFixedWidth(70)
+            h.addWidget(cap)
+            s = QSlider(Qt.Orientation.Horizontal, menu)
+            s.setRange(lo, hi)
+            s.setValue(value)
+            s.setFixedWidth(150)
+            s.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            s.setToolTip(tooltip)
+            s.valueChanged.connect(slot)
+            h.addWidget(s)
+            value_label = QLabel(f"{value}%", menu)
+            value_label.setObjectName("SliderValue")
+            h.addWidget(value_label)
+            h.addStretch(1)
+            return s, value_label
+
+        r = row()
+        self.snap_btn = item(r, "snapshot", "Screenshot", "Save a screenshot with your annotations (F9)",
+                             self.capture_annotated)
+        self.pass_btn = item(r, "pass_through", "Pass-through", "Click through to the desktop (F8)",
+                             self.toggle_pass_through, checkable=True)
+        r.addStretch(1)
+        r = row()
+        self.hide_ui_btn = item(r, "hide_ui", "Hide interface", "Hide the toolbars (Tab shows them)",
+                                self.toggle_interface)
+        self.monitor_btn = item(r, "monitor", "Next monitor", "Next monitor (F7)", self.move_to_next_screen)
+        r.addStretch(1)
+
+        heading("CAPTURE")
+        r = row()
+        self.capture_btn = item(r, "region", "Capture area", "Select an area to annotate (R)",
+                                self.begin_region_selection)
+        self.region_btn = item(r, "margin", "Margin and area", "Annotation margin and capture area",
+                               self._show_region_popup, checkable=True)
+        r.addStretch(1)
+
+        heading("BACKDROP")
+        r = row()
+        self.backdrop_btn = item(r, None, "", "Backdrop behind your annotations (click to cycle)",
+                                 self._cycle_backdrop, close=False)
+        self.backdrop_btn.setIcon(self._backdrop_icon(self.backdrop))
+        self.backdrop_btn.setIconSize(QSize(18, 18))
+        self.backdrop_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.backdrop_btn.setText(f"Backdrop: {self._BACKDROP_LABEL[self.backdrop]}")
+        r.addStretch(1)
+        self.backdrop_opacity_slider, self.backdrop_opacity_value_label = slider_row(
+            "INTENSITY", 10, 100, int(self.backdrop_opacity * 100), self._on_backdrop_opacity_slider_changed,
+            "Backdrop intensity")
+
+        heading("DRAWING")
+        r = row()
+        cap = QLabel("PRESSURE", menu)
+        cap.setObjectName("SliderCaption")
+        cap.setFixedWidth(70)
+        r.addWidget(cap)
+        self.pressure_buttons = {}
+        for name, tip in (("soft", "Full strength with a light touch"), ("normal", "Linear"),
+                          ("firm", "Needs more force for full strength")):
+            b = item(r, None, name.capitalize(), f"Pen pressure response: {tip}",
+                     lambda n=name: self._set_pressure_curve(n), checkable=True, close=False)
+            self.pressure_buttons[name] = b
+        r.addStretch(1)
+        self.smoothing_slider, self.smoothing_value_label = slider_row(
+            "STABILIZE", 0, 90, int(self.smoothing * 100), self._on_smoothing_slider_changed,
+            "Stabilizer: steadier lines that trail the pen (all brushes)")
+
+        heading("APP")
+        r = row()
+        self.autostart_btn = item(r, None, "Start with Windows", "Start Crit Overlay when you sign in",
+                                  lambda: self.autostart_toggled.emit(self.autostart_btn.isChecked()),
+                                  checkable=True, close=False)
+        self.autostart_btn.hide()  # until app.py says autostart is available
+        self.folder_btn = item(r, "folder", "Screenshots folder", "Open the folder screenshots are saved to",
+                               self.open_screenshot_folder)
+        r.addStretch(1)
+
+        v.addSpacing(4)
+        r = row()
+        self.clear_btn = item(r, "clear", "Clear all", "Remove every annotation (undoable)", self.clear)
+        r.addStretch(1)
+        self.exit_btn = item(r, "exit", "Exit", "Exit (Esc)", self.dismiss)
+        menu.adjustSize()
+        return menu
+
+    def _show_more_menu(self):
+        menu = self.more_menu
+        for name, b in self.pressure_buttons.items():
+            b.setChecked(name == self.pressure_curve)
+        self.pass_btn.setChecked(self.pass_through)
+        self._refresh_region_button()
+        menu.adjustSize()
+        anchor = self.more_btn.mapToGlobal(self.more_btn.rect().bottomRight())
+        menu.move(anchor.x() - menu.width(), anchor.y() + 8)
+        menu.show()
+
+    def set_autostart_checked(self, checked):
+        """Called by app.py: show the Start with Windows toggle in the More
+        menu with its current state."""
+        self.autostart_btn.show()
+        self.autostart_btn.setChecked(bool(checked))
+
+    def open_screenshot_folder(self):
+        folder = self._last_good_screenshot_dir or paths.current().screenshot_dir_candidates(
+            self._screenshot_dir_override)[0]
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(folder))  # noqa: S606 - user action, our own folder
+        except Exception:
+            logger.warning("Couldn't open %s", folder, exc_info=True)
+            self.status_changed.emit(f"Couldn't open {folder}")
+
+    def toggle_interface(self):
+        """Tab: hide or show the toolbar and context bar. Drawing and every
+        shortcut keep working while hidden."""
+        if self.pass_through or self.capture_pending():
+            return
+        self._ui_hidden = not self._ui_hidden
+        self.hover_tip.hide()
+        self.panel.setVisible(not self._ui_hidden)
+        self._sync_text_bar()
+        if self._ui_hidden:
+            self.status_changed.emit("Interface hidden. Tab shows it")
+
+    def capture_pending(self):
+        return self._grabbing or self._capturing
 
     def _text_style_changed(self, what=None):
         te = self._text_edit
@@ -848,8 +1137,14 @@ class Overlay(QWidget):
 
     def _set_text_size(self, value):
         self.text_size = int(value)
-        self.text_size_label.setText(f"{self.text_size}px")
+        self._sync_text_size_widgets()
         self._text_style_changed("size")
+
+    def _sync_text_size_widgets(self):
+        for widget in (self.text_size_slider, self.text_size_label):
+            widget.blockSignals(True)
+            widget.setValue(self.text_size)
+            widget.blockSignals(False)
 
     def _set_text_bold(self, bold):
         self.text_bold = bool(bold)
@@ -1083,15 +1378,17 @@ class Overlay(QWidget):
         self.text_bold = stroke.font.bold
         self.text_align = stroke.font.align
         self.text_size = int(max(C.MIN_TEXT_SIZE, min(C.MAX_TEXT_SIZE, round(stroke.size * self._view_scale()))))
-        for widget in (self.font_combo, self.text_size_slider, self.bold_btn, *self.align_btns.values()):
+        for widget in (self.font_combo, self.text_size_slider, self.text_size_label, self.bold_btn,
+                       *self.align_btns.values()):
             widget.blockSignals(True)
         self.font_combo.setCurrentText(self.text_family)
         self.text_size_slider.setValue(self.text_size)
-        self.text_size_label.setText(f"{self.text_size}px")
+        self.text_size_label.setValue(self.text_size)
         self.bold_btn.setChecked(self.text_bold)
         for a, btn in self.align_btns.items():
             btn.setChecked(a == self.text_align)
-        for widget in (self.font_combo, self.text_size_slider, self.bold_btn, *self.align_btns.values()):
+        for widget in (self.font_combo, self.text_size_slider, self.text_size_label, self.bold_btn,
+                       *self.align_btns.values()):
             widget.blockSignals(False)
 
     def _modify_selection(self, fn, merge_key=None):
@@ -1259,6 +1556,7 @@ class Overlay(QWidget):
         add("Ctrl+V", self.paste)
         add("Ctrl+D", self.duplicate_selection)
         add("Delete", self.delete_selection)
+        add("Tab", self.toggle_interface)
         add("Ctrl+Z", self.undo)
         add("Ctrl+Shift+Z", self.redo)
         add("F7", self.move_to_next_screen)
@@ -1312,6 +1610,7 @@ class Overlay(QWidget):
             brush_tuning=self.brush_tuning,
             pressure_curve=self.pressure_curve,
             eraser_style=self.eraser_style,
+            eraser_opacity=self.eraser_opacity,
         )
 
     # State setters. Every mutable tool property goes through one of these,
@@ -1348,9 +1647,12 @@ class Overlay(QWidget):
         was_brush = self.mode == "brush"
         self._set_mode("brush")
         if was_brush:
-            if self._brush_popup is None:
-                self._brush_popup = BrushPopup(self)
-            self._brush_popup.show_below(self.brush_btn)
+            self._show_brush_popup(self.brush_btn)
+
+    def _show_brush_popup(self, anchor):
+        if self._brush_popup is None:
+            self._brush_popup = BrushPopup(self)
+        self._brush_popup.show_below(anchor)
 
     def _on_eraser_button(self):
         was_eraser = self.mode == "eraser"
@@ -1366,6 +1668,7 @@ class Overlay(QWidget):
             return
         self.eraser_style = style
         self.status_changed.emit("Soft eraser" if style == "soft" else "Hard eraser")
+        self._sync_text_bar()
         self._show_size_preview()
         self._save_settings()
 
@@ -1393,6 +1696,7 @@ class Overlay(QWidget):
             self._set_mode("brush")
         self.status_changed.emit(self._preset_label(key))
         self._show_size_preview()
+        self._sync_text_bar()
         self._save_settings()
 
     def _tuning_for(self, key):
@@ -1471,15 +1775,42 @@ class Overlay(QWidget):
         if self.mode == "eyedropper":
             self._set_mode(self._pre_eyedropper_mode)
 
+    def _selected_shape(self):
+        s = self.selection if self.mode == "select" else None
+        return s if s is not None and s.shape not in (None, "text") else None
+
     def _active_size(self):
-        return self.eraser_size if self.mode == "eraser" else self.brush_size
+        if self.mode == "eraser":
+            return self.eraser_size
+        shape = self._selected_shape()
+        if shape is not None:
+            return round(max(C.MIN_SIZE, min(C.MAX_SIZE, shape.size * self._view_scale())), 2)
+        return self.brush_size
 
     def _sync_size_slider(self):
         value = self._active_size()
-        self.size_slider.blockSignals(True)
-        self.size_slider.setValue(dab.size_to_slider(value))
-        self.size_slider.blockSignals(False)
-        self.size_value_label.setText(dab.format_size(value))
+        for widget, v in ((self.size_slider, dab.size_to_slider(value)), (self.size_value_label, value)):
+            widget.blockSignals(True)
+            widget.setValue(v)
+            widget.blockSignals(False)
+
+    def _active_opacity(self):
+        if self.mode == "eraser":
+            return self.eraser_opacity
+        if self.mode == "select" and self.selection is not None:
+            return self.selection.opacity
+        return self.opacity
+
+    def _sync_opacity_slider(self):
+        percent = int(round(self._active_opacity() * 100))
+        for widget in (self.opacity_slider, self.opacity_value_label):
+            widget.blockSignals(True)
+            widget.setValue(percent)
+            widget.blockSignals(False)
+
+    def _sync_color_swatch(self):
+        color = self.selection.color if (self.mode == "select" and self.selection is not None) else self.color
+        self.color_btn.setIcon(icons.build_color_swatch_icon(QColor(color).name()))
 
     def _set_size(self, value):
         value = round(max(C.MIN_SIZE, min(C.MAX_SIZE, float(value))), 2)
@@ -1487,12 +1818,12 @@ class Overlay(QWidget):
             self.eraser_size = value
         else:
             self.brush_size = value
-        self._sync_size_slider()
         if self.mode in ("brush", "eraser"):
             self._show_size_preview()
         if self.selection is not None and self.selection.shape != "text":
             size = value / self._view_scale()
             self._modify_selection(lambda s: setattr(s, "size", size), merge_key="size")
+        self._sync_size_slider()
         self._save_settings()
 
     def _on_size_slider_changed(self, v):
@@ -1503,11 +1834,13 @@ class Overlay(QWidget):
 
     def _set_opacity(self, percent):
         percent = max(5, min(100, int(round(percent))))
+        if self.mode == "eraser":
+            self.eraser_opacity = percent / 100.0
+            self._sync_opacity_slider()
+            self._save_settings()
+            return
         self.opacity = percent / 100.0
-        self.opacity_slider.blockSignals(True)
-        self.opacity_slider.setValue(percent)
-        self.opacity_slider.blockSignals(False)
-        self.opacity_value_label.setText(f"{percent}%")
+        self._sync_opacity_slider()
         if self._text_edit is not None:
             self._text_edit.opacity = self.opacity
             self.setFocus()
@@ -1515,6 +1848,7 @@ class Overlay(QWidget):
         elif self.selection is not None:
             opacity = self.opacity
             self._modify_selection(lambda s: setattr(s, "opacity", opacity), merge_key="opacity")
+            self._sync_opacity_slider()
         self._save_settings()
 
     def _on_opacity_slider_changed(self, v):
@@ -1565,6 +1899,7 @@ class Overlay(QWidget):
     def _set_backdrop(self, value):
         self.backdrop = value
         self.backdrop_btn.setIcon(self._backdrop_icon(value))
+        self.backdrop_btn.setText(f"Backdrop: {self._BACKDROP_LABEL[value]}")
         self.backdrop_btn.setToolTip(f"Backdrop: {self._BACKDROP_LABEL[value]} (click to cycle)")
         self._save_settings()
         # The backdrop is its own layer, painted underneath the canvas on
@@ -1969,7 +2304,7 @@ class Overlay(QWidget):
         self._refresh_region_button()
         if self._region_popup is None:
             self._region_popup = RegionPopup(self)
-        self._region_popup.show_below(self.region_btn)
+        self._region_popup.show_below(self.more_btn)
 
     # -- window / mode actions ---------------------------------------------
 
@@ -1980,6 +2315,7 @@ class Overlay(QWidget):
         if self._tray_available:
             shows = f"{hotkey_text} or the tray icon" if hotkey_text else "the tray icon"
             self.exit_btn.setIcon(icons.build_icon("hide"))
+            self.exit_btn.setText("Hide")
             self.exit_btn.setToolTip(f"Hide (Esc). {shows} shows it again")
         else:
             self.exit_btn.setIcon(icons.build_icon("exit"))
@@ -2065,7 +2401,7 @@ class Overlay(QWidget):
         if not ok and self._click_through_native_ok is not False:
             logger.warning("Couldn't set native click-through; relying on Qt's attribute only")
         self._click_through_native_ok = ok
-        self.panel.setVisible(not self.pass_through)
+        self.panel.setVisible(not self.pass_through and not self._ui_hidden)
         self.pass_btn.setChecked(self.pass_through)
         focus = QApplication.focusWindow()
         # One line per transition, so a report of "toolbar stopped
@@ -2146,7 +2482,8 @@ class Overlay(QWidget):
         # proportionally larger stroke in image pixels.
         shape = self.mode if self.mode in SHAPES and not use_eraser else None
         base = self.eraser_size if use_eraser else self.brush_size
-        self.current = Stroke(self.color, base / self._view_scale(), self.opacity, use_eraser, shape)
+        strength = self.eraser_opacity if use_eraser else self.opacity
+        self.current = Stroke(self.color, base / self._view_scale(), strength, use_eraser, shape)
         self._dab = None
         self._live_tail = None
         self._live_layer = None
@@ -2530,7 +2867,7 @@ class Overlay(QWidget):
             return True
         if self.hover_tip.isVisible() and self.hover_tip.geometry().contains(pos.toPoint()):
             return True
-        if self.text_bar.isVisible() and self.text_bar.geometry().contains(pos.toPoint()):
+        if self.props_bar.isVisible() and self.props_bar.geometry().contains(pos.toPoint()):
             return True
         return False
 
@@ -2808,6 +3145,7 @@ class Overlay(QWidget):
         if stroke.eraser:
             painter.save()
             painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationOut)
+            painter.setOpacity(max(0.01, min(1.0, stroke.opacity)))
             painter.drawPixmap(origin, pixmap)
             painter.restore()
             return
@@ -2980,6 +3318,7 @@ class Overlay(QWidget):
                 self._draw_stroke(p, stroke)
             p.resetTransform()
             p.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+            p.setOpacity(max(0.01, min(1.0, eraser.opacity)))
             p.drawPixmap(0, 0, mask)
         finally:
             p.end()
@@ -3056,6 +3395,7 @@ class Overlay(QWidget):
                     tp.translate(-dirty.topLeft())
                     tp.drawPixmap(self._canvas_origin, self._canvas)
                     tp.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationOut)
+                    tp.setOpacity(max(0.01, min(1.0, self.current.opacity)))
                     self._paint_live(tp)
                 finally:
                     tp.end()
