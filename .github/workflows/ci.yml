@@ -1,14 +1,29 @@
-# Lint, unit tests and the standalone build on every push and pull request.
-# Also called by release.yml, so a tag only gets a draft release if all of
-# this passes. Hardware and lab-machine acceptance stays a manual gate
-# (docs/COMPATIBILITY.md, "Manual validation required before release").
+# Change-aware CI for pull requests and pushes to main. Also called by
+# release.yml. The "ci" job always runs and is the only required status check,
+# so skipped jobs never leave a required check pending.
+#
+# What runs depends on the files changed (against the PR base, or the previous
+# main commit for a push):
+#   docs/**, top-level *.md, LICENSE   docs link check only
+#   tests/**                           also lint and unit tests
+#   anything else                      also both builds (build.bat, self-tests)
+# A push to main runs nothing when a pull request already passed full
+# validation (lint, tests, both builds) on the identical tree, which is the
+# normal case for a merge. Hardware and lab-machine acceptance stays a manual
+# gate (docs/COMPATIBILITY.md, "Manual validation required before release").
 name: CI
 
 on:
-  push:
-    branches: ["**"]
   pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
   workflow_call:
+    inputs:
+      scope:
+        description: "full: lint, tests and both builds. release-build: only the windows-2025 build."
+        type: string
+        default: full
 
 permissions:
   contents: read
@@ -23,46 +38,134 @@ env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read  # look up validation records of earlier runs
+    outputs:
+      tree: ${{ steps.plan.outputs.tree }}
+      docs: ${{ steps.plan.outputs.docs }}
+      code: ${{ steps.plan.outputs.code }}
+      build: ${{ steps.plan.outputs.build }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: plan
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          SCOPE: ${{ inputs.scope }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          tree=$(git rev-parse 'HEAD^{tree}')
+          emit() {
+            printf 'tree=%s\ndocs=%s\ncode=%s\nbuild=%s\n' "$tree" "$1" "$2" "$3" | tee -a "$GITHUB_OUTPUT"
+          }
+
+          # Called by release.yml: the caller decides.
+          case "$SCOPE" in
+            full) emit true true true; exit 0 ;;
+            release-build) emit false false true; exit 0 ;;
+          esac
+
+          # A merge whose tree a pull request already fully validated.
+          # Only records from this repository's own branches count.
+          if [ "$EVENT" = push ]; then
+            n=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=ci-validated-$tree" \
+                  --jq '[.artifacts[] | select((.expired | not) and .workflow_run.head_repository_id == .workflow_run.repository_id)] | length') || n=0
+            if [ "$n" -gt 0 ]; then
+              echo "Tree $tree already passed full validation; nothing to rerun."
+              emit false false false; exit 0
+            fi
+          fi
+
+          case "$EVENT" in
+            pull_request) base=$PR_BASE ;;
+            push) base=$BEFORE ;;
+            *) base= ;;  # workflow_dispatch: everything
+          esac
+          if [ -z "$base" ] || ! files=$(git diff --name-only "$base" HEAD 2>/dev/null); then
+            echo "No usable base; running everything."
+            emit true true true; exit 0
+          fi
+          echo "$files" | sed 's/^/changed: /'
+          code=false; build=false
+          while IFS= read -r f; do
+            case "$f" in
+              ""|docs/*|LICENSE) ;;
+              */*) [[ "$f" == tests/* ]] && code=true || { code=true; build=true; } ;;
+              *.md) ;;
+              *) code=true; build=true ;;
+            esac
+          done <<< "$files"
+          emit true "$code" "$build"
+
+  docs:
+    needs: changes
+    if: needs.changes.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: python3 packaging/check_docs.py
+
   lint:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ env.BUILD_PYTHON }}
+          cache: pip
+          cache-dependency-path: packaging/requirements-lint.txt
       - run: "python -m pip install --require-hashes --only-binary=:all: -r packaging/requirements-lint.txt"
       - run: python -m pyflakes crit_overlay packaging tests
       # Invalid escapes etc. are only warnings today; fail on them now.
       - run: python -W error -m compileall -q -f crit_overlay packaging tests
 
   test:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     name: test (${{ matrix.os }}, Python ${{ matrix.python }}, ${{ matrix.qt }})
     strategy:
       fail-fast: false
       matrix:
         include:
           # Release toolchain: the hash-locked PySide6 from the build lock.
-          - { os: windows-2025, python: "3.13.17", qt: locked, deps: "-r packaging/requirements-build.txt --require-hashes" }
-          - { os: windows-2022, python: "3.13.17", qt: locked, deps: "-r packaging/requirements-build.txt --require-hashes" }
-          - { os: windows-2025, python: "3.12", qt: locked, deps: "-r packaging/requirements-build.txt --require-hashes" }
+          - { os: windows-2025, python: "3.13.17", qt: locked, deps: "-r packaging/requirements-build.txt --require-hashes", lock: packaging/requirements-build.txt }
+          - { os: windows-2022, python: "3.13.17", qt: locked, deps: "-r packaging/requirements-build.txt --require-hashes", lock: packaging/requirements-build.txt }
+          - { os: windows-2025, python: "3.12", qt: locked, deps: "-r packaging/requirements-build.txt --require-hashes", lock: packaging/requirements-build.txt }
           # Oldest configuration documented for running from source.
-          - { os: windows-2022, python: "3.9", qt: "PySide6 6.7.3", deps: "PySide6-Essentials==6.7.3" }
+          - { os: windows-2022, python: "3.9", qt: "PySide6 6.7.3", deps: "PySide6-Essentials==6.7.3", lock: .github/workflows/ci.yml }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: ${{ matrix.lock }}
       - run: "python -m pip install --only-binary=:all: ${{ matrix.deps }}"
       - run: python -m unittest discover -s tests -t . -v
 
   build:
     name: build (${{ matrix.os }})
-    needs: [lint, test]
+    needs: [changes, lint, test]
+    # Runs after lint and tests pass, or without them for a release build.
+    if: >-
+      !cancelled() && needs.changes.outputs.build == 'true'
+      && needs.changes.result == 'success'
+      && needs.lint.result != 'failure' && needs.test.result != 'failure'
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2025, windows-2022]
+        os: ${{ fromJSON(inputs.scope == 'release-build' && '["windows-2025"]' || '["windows-2025", "windows-2022"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -70,6 +173,10 @@ jobs:
         id: py
         with:
           python-version: ${{ env.BUILD_PYTHON }}
+          # Only speeds up downloads: every wheel is still checked against
+          # the hashes in the lock.
+          cache: pip
+          cache-dependency-path: packaging/requirements-build.txt
       # The same script as a local release build: hash-locked venv,
       # PyInstaller, static DLL audit, self-tests in clean/polluted/non-ASCII
       # environments, zip and SHA256SUMS.txt.
@@ -103,6 +210,7 @@ jobs:
   # Doesn't fail the run.
   reproducibility:
     needs: build
+    if: needs.build.result == 'success' && inputs.scope != 'release-build'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -125,3 +233,26 @@ jobs:
           print(msg)
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
               f.write(f"### Reproducibility\n{msg}\n")
+
+  # The required status check. Fails if change detection failed or any job
+  # that ran failed or was cancelled. Jobs skipped as not relevant pass.
+  ci:
+    if: always()
+    needs: [changes, docs, lint, test, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every needed job to pass
+        if: needs.changes.result != 'success' || contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
+      # Lets a push to main (and release.yml) skip revalidating this exact
+      # tree. Written only when lint, all tests and both builds passed.
+      - name: Record full validation
+        if: needs.lint.result == 'success' && needs.test.result == 'success' && needs.build.result == 'success' && inputs.scope != 'release-build'
+        run: echo "${{ needs.changes.outputs.tree }}" > validated-tree.txt
+      - if: needs.lint.result == 'success' && needs.test.result == 'success' && needs.build.result == 'success' && inputs.scope != 'release-build'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ci-validated-${{ needs.changes.outputs.tree }}
+          path: validated-tree.txt
+          retention-days: 90
+          overwrite: true
