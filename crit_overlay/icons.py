@@ -373,7 +373,8 @@ LUCIDE = {
     "bold": "bold", "align_left": "align-left", "align_center": "align-center", "align_right": "align-right",
     "snapshot": "camera", "pass_through": "mouse-pointer-click", "hide_ui": "eye-off", "monitor": "monitor",
     "region": "scan", "margin": "sliders-horizontal", "folder": "folder-open", "clear": "trash-2",
-    "exit": "x", "hide": "chevron-down",
+    "exit": "x", "hide": "chevron-down", "settings": "settings",
+    "chevron_down": "chevron-down", "chevron_right": "chevron-right",
 }
 LUCIDE_STROKE = 1.75  # a touch lighter than Lucide's 2, for 20 px on a dark bar
 _svg_cache = {}

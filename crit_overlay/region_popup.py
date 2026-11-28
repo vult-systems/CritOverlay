@@ -11,6 +11,7 @@ from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QToolButton, QVBoxLayout
 
 from . import constants as C
+from .ui_widgets import place_popup
 from . import icons
 
 
@@ -134,6 +135,4 @@ class RegionPopup(QFrame):
     def show_below(self, widget):
         self.sync()
         self.adjustSize()
-        pos = widget.mapToGlobal(widget.rect().bottomLeft())
-        self.move(pos.x(), pos.y() + 6)
-        self.show()
+        place_popup(self, widget)

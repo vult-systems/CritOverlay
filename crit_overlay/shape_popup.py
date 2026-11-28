@@ -5,6 +5,7 @@ from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QToolButton
 
 from . import constants as C
+from .ui_widgets import place_popup
 from . import icons
 
 SHAPE_LABELS = {
@@ -45,6 +46,4 @@ class ShapePopup(QFrame):
         for shape, btn in self.buttons.items():
             btn.setChecked(shape == self._overlay.mode)
         self.adjustSize()
-        pos = widget.mapToGlobal(widget.rect().bottomLeft())
-        self.move(pos.x(), pos.y() + 6)
-        self.show()
+        place_popup(self, widget)

@@ -29,7 +29,8 @@ class ChromeTests(CaptureCase):
         o = self.o
         buttons = [w for w in o.panel.findChildren(QToolButton) if not w.isHidden()]
         expected = [o.select_btn, o.brush_btn, o.eraser_btn, o.shape_btn, o.text_btn, o.eyedropper_btn,
-                    o.undo_btn, o.redo_btn, o.more_btn]
+                    o.undo_btn, o.redo_btn, o.capture_btn, o.snap_btn, o.more_btn]
+        buttons = [b for b in buttons if not o.props_bar.isAncestorOf(b)]
         self.assertEqual(set(buttons), set(expected))
         for b in expected:
             self.assertTrue(b.toolTip(), "every button explains itself")
@@ -51,7 +52,7 @@ class ChromeTests(CaptureCase):
             with self.subTest(mode=mode):
                 self.assertEqual(self.shown_sections(), sections)
         o._set_mode("rect")
-        self.assertEqual(o.size_caption.text(), "WIDTH")
+        self.assertEqual(o.size_value_label.caption, "Width")
         self.assertTrue(o.shape_type_btns["rect"].isChecked())
 
     def test_selection_shows_its_own_properties(self):
@@ -103,8 +104,8 @@ class ChromeTests(CaptureCase):
         o = self.o
         o._set_mode("brush")
         field = o.size_value_label
-        field.lineEdit().setText("7.5")
-        field.interpretText()
+        field.entry.setText("7.5")
+        field._apply_entry()
         self.assertEqual(o.brush_size, 7.5)
         self.assertEqual(field.text(), "7.5px")
         field.stepBy(1)
@@ -131,10 +132,11 @@ class ChromeTests(CaptureCase):
     def test_more_menu_holds_the_secondary_controls(self):
         o = self.o
         m = o.more_menu
-        for w in (o.snap_btn, o.pass_btn, o.hide_ui_btn, o.capture_btn, o.region_btn, o.backdrop_btn,
-                  o.backdrop_opacity_slider, o.smoothing_slider, o.clear_btn, o.exit_btn, o.folder_btn,
-                  *o.pressure_buttons.values()):
+        for w in (o.snap_menu_btn, o.pass_btn, o.hide_ui_btn, o.capture_menu_btn, o.region_btn, o.backdrop_btn,
+                  o.backdrop_opacity_slider, o.clear_btn, o.exit_btn, o.folder_btn, o.prefs_btn):
             self.assertIs(w.window(), m)
+        for w in (o.smoothing_slider, o.autostart_btn, *o.pressure_buttons.values()):
+            self.assertIs(w.window(), o.prefs_popup, "preferences live in their own popup")
         self.assertTrue(o.autostart_btn.isHidden(), "until app.py wires autostart")
         got = []
         o.autostart_toggled.connect(got.append)

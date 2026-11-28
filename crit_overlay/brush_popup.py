@@ -8,13 +8,15 @@ its tooltip. Pressure response and the stabilizer apply to every brush and
 live in the More menu.
 """
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSlider, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QFont, QIcon
+from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QSlider, QToolButton, QVBoxLayout, QWidget
 
 from . import constants as C
 from . import dab
+from . import brush_preview
 from . import mypaint_engine
+from .ui_widgets import Collapsible, place_popup
 
 MP = mypaint_engine.PREFIX
 
@@ -81,22 +83,24 @@ def _button(parent, text, tooltip, slot):
     return btn
 
 
+TILE_INK = "#ececef"  # previews in a neutral ink, so brushes compare on shape and texture
+
+
 class BrushPopup(QFrame):
-    """The recommended five brushes up front, by purpose; the alternatives
-    still being compared below them; hardness and spacing behind
-    Fine-tune."""
+    """Brush tiles, each showing a stroke the brush engine actually painted.
+    The recommended five are large and first; the experimental brushes
+    (the alternatives still being compared) fold away below them."""
 
     def __init__(self, overlay):
         super().__init__(None, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
         self._overlay = overlay
         self.setObjectName("Toolbar")
-        self.setStyleSheet(C.TOOLBAR_STYLE + """
-            QToolButton#Featured { padding: 6px 10px; min-width: 76px; min-height: 40px; }
-        """)
+        self.setStyleSheet(C.TOOLBAR_STYLE)
+        dpr = max(1.0, float(overlay.devicePixelRatioF()))
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(8, 8, 8, 8)
-        outer.setSpacing(4)
+        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setSpacing(6)
         self.buttons = {}
         items = entries()
 
@@ -106,40 +110,29 @@ class BrushPopup(QFrame):
         featured = QHBoxLayout()
         featured.setSpacing(4)
         for purpose, key, label, recommended in items:
-            if not recommended:
-                continue
-            tip = f"{purpose}: {label}. Engine: {_engine(key)}"
-            btn = _button(self, purpose + chr(10) + label, tip, lambda checked=False, k=key: self._pick(k))
-            btn.setObjectName("Featured")
-            f = QFont(btn.font())
-            f.setBold(True)
-            btn.setFont(f)
-            featured.addWidget(btn)
-            self.buttons[key] = btn
-        featured.addStretch(1)
+            if recommended:
+                featured.addWidget(self._tile(key, purpose + chr(10) + label, f"{label}. Engine: {_engine(key)}",
+                                              108, 40, dpr, bold=True))
         outer.addLayout(featured)
 
         others = [(p, k, label) for p, k, label, rec in items if not rec]
         if others:
-            cap = QLabel("MORE BRUSHES (EVALUATION)", self)
-            cap.setObjectName("SliderCaption")
-            outer.addSpacing(4)
-            outer.addWidget(cap)
-            rows = {}
-            for purpose, key, label in others:
-                if purpose not in rows:
-                    rows[purpose] = _row(self, purpose)
-                    outer.addLayout(rows[purpose])
-                btn = _button(self, label, f"{purpose}: {label}. Engine: {_engine(key)}",
-                              lambda checked=False, k=key: self._pick(k))
-                rows[purpose].addWidget(btn)
-                self.buttons[key] = btn
-            for row in rows.values():
-                row.addStretch(1)
+            grid_host = QWidget()
+            grid = QGridLayout(grid_host)
+            grid.setContentsMargins(0, 0, 0, 0)
+            grid.setSpacing(4)
+            for i, (purpose, key, label) in enumerate(others):
+                grid.addWidget(self._tile(key, label, f"{purpose}: {label}. Engine: {_engine(key)}", 84, 28, dpr),
+                               i // 5, i % 5)
+            self.more = Collapsible("Experimental brushes", grid_host,
+                                    expanded=getattr(overlay, "_brush_more_expanded", False))
+            self.more.toggled.connect(lambda on: setattr(overlay, "_brush_more_expanded", on))
+            outer.addWidget(self.more)
 
         frow = QHBoxLayout()
         frow.addStretch(1)
         self.fine_btn = _button(self, "Fine-tune", "Hardness and spacing for this brush", self._toggle_fine)
+        self.fine_btn.setObjectName("Link")
         frow.addWidget(self.fine_btn)
         outer.addLayout(frow)
 
@@ -151,6 +144,25 @@ class BrushPopup(QFrame):
         self.spacing, self.spacing_label = self._slider(tl, "SPACING", 2, 50, self._on_spacing)
         outer.addWidget(self.tuning)
         self.tuning.hide()
+
+    def _tile(self, key, text, tooltip, w, h, dpr, bold=False):
+        btn = QToolButton(self)
+        btn.setObjectName("Tile")
+        btn.setCheckable(True)
+        btn.setAutoRaise(True)
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        btn.setIcon(QIcon(brush_preview.preview(key, TILE_INK, w, h, dpr)))
+        btn.setIconSize(QSize(w, h))
+        btn.setText(text)
+        btn.setToolTip(tooltip)
+        if bold:
+            f = QFont(btn.font())
+            f.setBold(True)
+            btn.setFont(f)
+        btn.clicked.connect(lambda checked=False, k=key: self._pick(k))
+        self.buttons[key] = btn
+        return btn
 
     def _slider(self, layout, caption, lo, hi, slot):
         row = QWidget(self.tuning)
@@ -208,9 +220,7 @@ class BrushPopup(QFrame):
 
     def show_below(self, widget):
         self.sync()
-        pos = widget.mapToGlobal(widget.rect().bottomLeft())
-        self.move(pos.x(), pos.y() + 6)
-        self.show()
+        place_popup(self, widget)
 
 
 class EraserPopup(QFrame):
@@ -236,7 +246,4 @@ class EraserPopup(QFrame):
     def show_below(self, widget):
         for style, btn in self.buttons.items():
             btn.setChecked(style == self._overlay.eraser_style)
-        self.adjustSize()
-        pos = widget.mapToGlobal(widget.rect().bottomLeft())
-        self.move(pos.x(), pos.y() + 6)
-        self.show()
+        place_popup(self, widget)

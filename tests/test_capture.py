@@ -312,7 +312,13 @@ class CaptureTests(CaptureCase):
 
     def painted_device_rects(self):
         o = self.o
-        return o.grab().toImage(), o.capture.view_device_rects(o._margin_px(), o._window_dpr())[1]
+        # The floating toolbar and its status toast may sit over the image's
+        # top edge; this checks the image, not the chrome.
+        o.panel.hide()
+        o.toast_label.hide()
+        img = o.grab().toImage()
+        o.panel.show()
+        return img, o.capture.view_device_rects(o._margin_px(), o._window_dpr())[1]
 
     def test_odd_selection_at_150_percent_has_seamless_edges(self):
         # 401 x 301 logical at 150% is 601.5 x 451.5 device px: the case
