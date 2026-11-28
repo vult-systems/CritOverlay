@@ -103,6 +103,22 @@ class AppConfig:
                 self._value("brush/backdrop_opacity", C.DEFAULT_BACKDROP_OPACITY, float), 0.1, 1.0
             ),
             **self._load_margin(),
+            **self._load_text(),
+        }
+
+    def _load_text(self):
+        # New keys with defaults; older files simply don't have them, so no
+        # migration is needed.
+        from .text_fonts import DEFAULT_FAMILY, FAMILIES
+        family = self._value("text/family", DEFAULT_FAMILY, str)
+        align = self._value("text/align", "left", str)
+        bold = str(self._value("text/bold", "false", str)).strip().lower()
+        return {
+            "text_family": family if family in FAMILIES else DEFAULT_FAMILY,
+            "text_size": int(_clamp(self._value("text/size", C.DEFAULT_TEXT_SIZE, int),
+                                    C.MIN_TEXT_SIZE, C.MAX_TEXT_SIZE)),
+            "text_bold": bold in ("1", "true", "yes", "on"),
+            "text_align": align if align in C.TEXT_ALIGNS else "left",
         }
 
     def _load_margin(self):
@@ -118,7 +134,8 @@ class AppConfig:
 
     def save(self, *, color, size, opacity, smoothing, backdrop, backdrop_opacity,
              margin_enabled=C.DEFAULT_MARGIN_ENABLED, margin_size=C.DEFAULT_MARGIN_SIZE,
-             margin_color=C.DEFAULT_MARGIN_COLOR, margin_opacity=C.DEFAULT_MARGIN_OPACITY):
+             margin_color=C.DEFAULT_MARGIN_COLOR, margin_opacity=C.DEFAULT_MARGIN_OPACITY,
+             text_family=None, text_size=C.DEFAULT_TEXT_SIZE, text_bold=False, text_align="left"):
         self._settings.setValue("brush/color", QColor(color).name())
         self._settings.setValue("brush/size", int(size))
         self._settings.setValue("brush/opacity", float(opacity))
@@ -129,6 +146,11 @@ class AppConfig:
         self._settings.setValue("margin/size", int(margin_size))
         self._settings.setValue("margin/color", margin_color)
         self._settings.setValue("margin/opacity", float(margin_opacity))
+        if text_family:
+            self._settings.setValue("text/family", text_family)
+        self._settings.setValue("text/size", int(text_size))
+        self._settings.setValue("text/bold", "true" if text_bold else "false")
+        self._settings.setValue("text/align", text_align)
         self._settings.sync()
         if self._settings.status() != QSettings.Status.NoError and not self._save_failed_logged:
             # Logged once: this is called on every debounced slider change.

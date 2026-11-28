@@ -274,7 +274,54 @@ def arrow_glyph(painter, color, size):
     painter.drawLine(tip, QPointF(size * 0.76, size * 0.52))
 
 
+def text_glyph(painter, color, size):
+    painter.setPen(_stroke_pen(color, size * 0.10))
+    painter.drawLine(QPointF(size * 0.24, size * 0.24), QPointF(size * 0.76, size * 0.24))
+    painter.drawLine(QPointF(size * 0.50, size * 0.24), QPointF(size * 0.50, size * 0.80))
+
+
+def bold_glyph(painter, color, size):
+    painter.setPen(_stroke_pen(color, size * 0.13))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    path = QPainterPath()
+    path.moveTo(size * 0.34, size * 0.20)
+    path.lineTo(size * 0.34, size * 0.80)
+    path.lineTo(size * 0.58, size * 0.80)
+    path.cubicTo(size * 0.76, size * 0.80, size * 0.76, size * 0.50, size * 0.56, size * 0.50)
+    path.lineTo(size * 0.34, size * 0.50)
+    path.moveTo(size * 0.56, size * 0.50)
+    path.cubicTo(size * 0.72, size * 0.50, size * 0.72, size * 0.20, size * 0.54, size * 0.20)
+    path.lineTo(size * 0.34, size * 0.20)
+    painter.drawPath(path)
+
+
+def _align_glyph(painter, color, size, align):
+    painter.setPen(_stroke_pen(color, size * 0.08))
+    for i, frac in enumerate((0.60, 0.40, 0.60, 0.32)):
+        w = size * frac
+        x = {"left": size * 0.2, "center": (size - w) / 2, "right": size * 0.8 - w}[align]
+        y = size * (0.26 + i * 0.16)
+        painter.drawLine(QPointF(x, y), QPointF(x + w, y))
+
+
+def align_left_glyph(painter, color, size):
+    _align_glyph(painter, color, size, "left")
+
+
+def align_center_glyph(painter, color, size):
+    _align_glyph(painter, color, size, "center")
+
+
+def align_right_glyph(painter, color, size):
+    _align_glyph(painter, color, size, "right")
+
+
 _GLYPHS = {
+    "text": text_glyph,
+    "bold": bold_glyph,
+    "align_left": align_left_glyph,
+    "align_center": align_center_glyph,
+    "align_right": align_right_glyph,
     "rect": rect_glyph,
     "ellipse": ellipse_glyph,
     "line": line_glyph,

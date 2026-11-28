@@ -107,6 +107,9 @@ class MigrationTests(unittest.TestCase):
             # Added after v1.4.2 (#10): absent from old files, so defaults.
             "margin_enabled": C.DEFAULT_MARGIN_ENABLED, "margin_size": C.DEFAULT_MARGIN_SIZE,
             "margin_color": C.DEFAULT_MARGIN_COLOR, "margin_opacity": C.DEFAULT_MARGIN_OPACITY,
+            # Text tool prototype: absent from old files, so defaults.
+            "text_family": "IBM Plex Sans", "text_size": C.DEFAULT_TEXT_SIZE, "text_bold": False,
+            "text_align": "left",
         })
         q = QSettings(str(self.path), QSettings.Format.IniFormat)
         self.assertEqual(int(q.value("meta/settings_version")), SETTINGS_VERSION)

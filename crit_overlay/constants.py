@@ -43,6 +43,12 @@ DEFAULT_MARGIN_SIZE = 120
 DEFAULT_MARGIN_COLOR = "white"  # "white" | "black"
 DEFAULT_MARGIN_OPACITY = 1.0
 
+# Text tool (on-screen pixel size, like the brush).
+DEFAULT_TEXT_SIZE = 32
+MIN_TEXT_SIZE = 8
+MAX_TEXT_SIZE = 200
+TEXT_ALIGNS = ("left", "center", "right")
+
 # Global show/hide hotkey (hotkeys.py). Configurable as [compat] hotkey or
 # --hotkey; "none" turns it off.
 DEFAULT_HOTKEY = "Ctrl+Alt+D"

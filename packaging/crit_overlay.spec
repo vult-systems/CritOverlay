@@ -82,7 +82,8 @@ QT_EXCLUDES = [
     "_tkinter",
 ]
 
-datas = []
+# Fonts for the text tool, with their licenses (SIL OFL 1.1).
+datas = [(str(root / "crit_overlay" / "fonts"), "crit_overlay/fonts")]
 _build_info = root / "build" / "build_info.json"
 if _build_info.exists():
     datas.append((str(_build_info), "."))

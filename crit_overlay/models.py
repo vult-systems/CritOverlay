@@ -6,7 +6,7 @@ from PySide6.QtGui import QColor
 
 
 class Stroke:
-    __slots__ = ("color", "size", "opacity", "eraser", "points", "shape")
+    __slots__ = ("color", "size", "opacity", "eraser", "points", "shape", "text", "font")
 
     def __init__(self, color, size, opacity, eraser=False, shape=None):
         self.color = QColor(color)
@@ -17,6 +17,19 @@ class Stroke:
         # None for a freehand stroke. Otherwise one of SHAPES, and points
         # holds exactly two entries: the drag's start and (constrained) end.
         self.shape = shape
+        # Text annotations (shape "text"): one point, the anchor. size is
+        # the font's pixel size; font is a TextStyle.
+        self.text = ""
+        self.font = None
+
+
+class TextStyle:
+    __slots__ = ("family", "bold", "align")
+
+    def __init__(self, family, bold=False, align="left"):
+        self.family = family
+        self.bold = bool(bold)
+        self.align = align
 
 
 SHAPES = ("rect", "ellipse", "line", "arrow")

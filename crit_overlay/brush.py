@@ -22,7 +22,7 @@ applies the ratio.
 import math
 
 from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen, QPixmap
 
 CATMULL_ROM_SAMPLES = 6
 
@@ -241,11 +241,15 @@ def shape_path(stroke):
 
 
 def shape_bounds(stroke, margin=3.0):
+    if stroke.shape == "text":
+        return text_rect(stroke).adjusted(-margin, -margin, margin, margin).toAlignedRect()
     pad = shape_width(stroke.size) / 2 + margin
     return shape_path(stroke).boundingRect().adjusted(-pad, -pad, pad, pad).toAlignedRect()
 
 
 def shape_is_degenerate(stroke, min_extent):
+    if stroke.shape == "text":
+        return not stroke.text.strip()
     (a, _), (b, _) = stroke.points[0], stroke.points[-1]
     return max(abs(b.x() - a.x()), abs(b.y() - a.y())) < min_extent
 
@@ -253,7 +257,7 @@ def shape_is_degenerate(stroke, min_extent):
 def render_shape_layer(stroke, dpr=1.0):
     """Like render_stroke_layer, for a shape. Returns (pixmap, origin) or
     None."""
-    if len(stroke.points) < 2:
+    if not stroke.points or (stroke.shape != "text" and len(stroke.points) < 2):
         return None
     bounds = shape_bounds(stroke)
     if bounds.width() <= 0 or bounds.height() <= 0:
@@ -265,10 +269,74 @@ def render_shape_layer(stroke, dpr=1.0):
         painter.translate(-bounds.topLeft())
         color = QColor(stroke.color)
         color.setAlpha(255)
-        painter.setPen(QPen(color, shape_width(stroke.size), Qt.PenStyle.SolidLine,
-                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawPath(shape_path(stroke))
+        if stroke.shape == "text":
+            paint_text(painter, stroke, color)
+        else:
+            painter.setPen(QPen(color, shape_width(stroke.size), Qt.PenStyle.SolidLine,
+                                Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(shape_path(stroke))
     finally:
         painter.end()
     return layer, bounds.topLeft()
+
+
+# -- text ----------------------------------------------------------------------
+#
+# Text is a Stroke with shape "text": an anchor point, the text, a pixel size
+# (stroke.size, in stroke coordinates) and a TextStyle. The anchor is the
+# block's top edge at its left, center or right, by alignment, so text grows
+# away from where it was clicked.
+
+
+def text_font(stroke):
+    font = QFont(stroke.font.family)
+    font.setPixelSize(max(1, round(stroke.size)))
+    font.setBold(stroke.font.bold)
+    return font
+
+
+def _text_lines(stroke):
+    font = text_font(stroke)
+    fm = QFontMetricsF(font)
+    lines = stroke.text.split("\n")
+    widths = [fm.horizontalAdvance(line) for line in lines]
+    return font, fm, lines, widths
+
+
+def text_rect(stroke):
+    """The text block's rect, in stroke coordinates. Never narrower than a
+    caret, so an empty box still has a place to show."""
+    _font, fm, lines, widths = _text_lines(stroke)
+    width = max(max(widths), fm.averageCharWidth() * 0.5)
+    height = fm.lineSpacing() * len(lines)
+    anchor = stroke.points[0][0]
+    left = {"left": anchor.x(), "center": anchor.x() - width / 2, "right": anchor.x() - width}[stroke.font.align]
+    return QRectF(left, anchor.y(), width, height)
+
+
+def _line_x(rect, width, align):
+    if align == "center":
+        return rect.left() + (rect.width() - width) / 2
+    if align == "right":
+        return rect.right() - width
+    return rect.left()
+
+
+def paint_text(painter, stroke, color):
+    font, fm, lines, widths = _text_lines(stroke)
+    rect = text_rect(stroke)
+    painter.setFont(font)
+    painter.setPen(color)
+    for i, (line, width) in enumerate(zip(lines, widths)):
+        painter.drawText(QPointF(_line_x(rect, width, stroke.font.align), rect.top() + fm.ascent() + i * fm.lineSpacing()), line)
+
+
+def text_caret(stroke):
+    """(top, bottom) QPointFs of a caret after the last character."""
+    _font, fm, lines, widths = _text_lines(stroke)
+    rect = text_rect(stroke)
+    i = len(lines) - 1
+    x = _line_x(rect, widths[-1], stroke.font.align) + widths[-1]
+    top = rect.top() + i * fm.lineSpacing()
+    return QPointF(x, top), QPointF(x, top + fm.lineSpacing())
