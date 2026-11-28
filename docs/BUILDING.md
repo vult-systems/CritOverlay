@@ -88,7 +88,7 @@ Runs automatically at the end of the build:
 |---|---|
 | lint | pyflakes (hash-pinned in `packaging/requirements-lint.txt`) and a compile with warnings as errors |
 | test | Unit tests on windows-2025 and windows-2022: Python 3.13.17 and 3.12 with the locked PySide6 6.8.3, and Python 3.9 with PySide6 6.7.3 (oldest source configuration) |
-| build | `packaginguild.bat` itself (with `CRIT_PYTHON` and `CRIT_NO_PAUSE=1`) on windows-2025 and windows-2022: locked toolchain, static DLL audit, self-tests, zip and `SHA256SUMS.txt`, uploaded as artifacts |
+| build | `packaging\build.bat` itself (with `CRIT_PYTHON` and `CRIT_NO_PAUSE=1`) on windows-2025 and windows-2022: locked toolchain, static DLL audit, self-tests, zip and `SHA256SUMS.txt`, uploaded as artifacts |
 | reproducibility | Compares every file in the two runners' zips; only `build_info.json` (build host) should differ. Informational only; it doesn't fail the run. |
 
 The hosted runners are Windows Server 2022 and 2025, single monitor at
@@ -120,7 +120,7 @@ monitors, pens, or managed lab machines. That stays a manual gate (below).
      checklist passes on real hardware and a lab machine.
 
 Release assets come from CI, not from a local build. A local
-`packaginguild.bat` is still the way to test the build and to run the
+`packaging\build.bat` is still the way to test the build and to run the
 self-test across several real monitors.
 
 ## Offline / restricted-network builds

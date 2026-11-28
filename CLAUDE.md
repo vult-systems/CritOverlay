@@ -90,17 +90,17 @@ Full procedure: `docs/BUILDING.md#releasing`.
 
 ## Feature freeze: v1.5.0
 
-In effect from 2026-11-25 until v1.5.0 is tagged stable after #4 passes. The acceptance baseline is **v1.5.0-rc.4** (commit 7d0f363).
+In effect from 2026-11-25 until v1.5.0 is tagged stable after #4 passes. The acceptance baseline is **v1.5.0-rc.5** (commit c889c81).
 
-On 2026-11-27 the owner reopened the freeze for one feature, the centered capture workflow (#23), to ship as v1.5.0-rc.5. The freeze resumes with rc.5 as the baseline once it's published; nothing else is admitted under this exception.
+The owner reopened the freeze once, on 2026-11-27, for the centered capture workflow (#23), which shipped in rc.5. The freeze resumed with rc.5 as the baseline; a further exception needs the owner's explicit approval.
 
-- **Allowed:** fixes for confirmed bugs, regressions (against rc.4 or v1.4.2), compatibility failures, and release blockers. Each needs an issue with a reproduction and the `release-blocker` label or a reason it's needed now. Docs corrections are allowed.
-- **Not allowed:** new features or options, UI changes, refactoring, dependency or toolchain upgrades (#8). Non-blocking concerns get the `tech-debt` label (tracked in #19) instead of a change.
-- **Releases:** no new RC without a validated reason: a fix that was reproduced and then verified. Without one, v1.5.0 is rc.4's code with only the version and changelog changed. Never re-tag, re-upload or delete rc.4 or v1.4.2.
+- **Allowed:** fixes for confirmed bugs, regressions (against rc.5, rc.4 or v1.4.2), compatibility failures, and release blockers. Each needs an issue with a reproduction and the `release-blocker` label or a reason it's needed now. Docs corrections are allowed.
+- **Not allowed:** new features or options, UI changes, refactoring, dependency or toolchain upgrades (#8). Non-blocking concerns get the `tech-debt` label (tracked in #19) instead of a change, including the unreachable live-region code (#26).
+- **Releases:** no new RC without a validated reason: a fix that was reproduced and then verified. Without one, v1.5.0 is rc.5's code with only the version and changelog changed. Never re-tag, re-upload or delete rc.5, rc.4 or v1.4.2.
 - Fixes shipped in an RC whose check is pending in #4 have the `awaiting-acceptance` label and close when their #4 item passes.
 - Limitations shipping with v1.5.0 are listed in `docs/COMPATIBILITY.md#known-limitations-v150`.
 
 ## Current state
 
 - **Repository settings:** `main` is protected: PR required (0 approvals), `lint`, the four `test` jobs and both `build` jobs required (`reproducibility` is informational), conversations resolved, no force-push or deletion. Merged branches are deleted automatically. Private vulnerability reporting is on (`SECURITY.md`). Renaming a CI job means updating the required checks.
-- **Releases:** v1.4.2 is the stable release. v1.5.0-rc.5 is the current pre-release, pending #4. It supersedes rc.4 (tray, hotkey, single instance, #14), rc.3, rc.2 (annotation margin fix, #13) and rc.1 (built locally before CI existed).
+- **Releases:** v1.4.2 is the stable release. v1.5.0-rc.5 is the current pre-release and the frozen acceptance baseline, pending #4. It supersedes rc.4 (tray, hotkey, single instance, #14), rc.3, rc.2 (annotation margin fix, #13) and rc.1 (built locally before CI existed).
