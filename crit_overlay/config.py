@@ -116,7 +116,8 @@ class AppConfig:
             tuning[key] = (_clamp(self._value(f"brush/{key}_hardness", p.hardness, float), 0.0, 1.0),
                            _clamp(self._value(f"brush/{key}_spacing", p.spacing, float), 0.02, 0.5))
         return {
-            "brush_preset": preset if preset in dab.PRESET_KEYS else dab.DEFAULT_PRESET,
+            "brush_preset": preset if (preset in dab.PRESET_KEYS or preset.startswith("mypaint:"))
+            else dab.DEFAULT_PRESET,
             "eraser_size": round(_clamp(self._value("brush/eraser_size", C.DEFAULT_ERASER_SIZE, float),
                                         C.MIN_SIZE, C.MAX_SIZE), 2),
             "brush_tuning": tuning,

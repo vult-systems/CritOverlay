@@ -419,7 +419,11 @@ def freehand_layer(stroke, dpr, cache=True):
         hit = layer_cache.get(stroke, dpr)
         if hit is not None:
             return hit
-    layer = render_dabs(stroke, all_dabs(stroke), dpr)
+    from . import mypaint_engine
+    if mypaint_engine.is_spec(stroke.brush):
+        layer = mypaint_engine.stroke_layer(stroke, dpr)
+    else:
+        layer = render_dabs(stroke, all_dabs(stroke), dpr)
     if layer is not None and cache:
         layer_cache.put(stroke, dpr, layer)
     return layer
@@ -432,7 +436,11 @@ def freehand_bounds(stroke):
         return QRectF(brush.segment_bounds(segments)) if segments else QRectF()
     xs = [p.x() for p, _ in stroke.points]
     ys = [p.y() for p, _ in stroke.points]
-    pad = stroke.size * (1 + preset_for(stroke.brush).jitter * 2) / 2 + 2
+    from . import mypaint_engine
+    if mypaint_engine.is_spec(stroke.brush):
+        pad = mypaint_engine.bounds_pad(stroke)
+    else:
+        pad = stroke.size * (1 + preset_for(stroke.brush).jitter * 2) / 2 + 2
     return QRectF(min(xs) - pad, min(ys) - pad, max(xs) - min(xs) + 2 * pad, max(ys) - min(ys) + 2 * pad)
 
 

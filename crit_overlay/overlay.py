@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 
 from . import brush
 from . import dab
+from . import mypaint_engine
 from . import capture as capture_mod
 from . import compat
 from . import constants as C
@@ -171,6 +172,10 @@ class Overlay(QWidget):
         self._live_tail = None       # provisional last segment, (pixmap, origin)
         self._input_has_pressure = False
         self._size_preview_until = 0.0
+        self._mp = None              # mypaint_engine.StrokePainter while drawing
+        self._mp_last_time = 0.0
+        if self.brush_preset.startswith(mypaint_engine.PREFIX) and not self._mypaint_preset_ok(self.brush_preset):
+            self.brush_preset = dab.DEFAULT_PRESET
         self.backdrop = saved["backdrop"]
         self.backdrop_opacity = saved["backdrop_opacity"]
         self.pass_through = False
@@ -1341,23 +1346,32 @@ class Overlay(QWidget):
                 self._brush_popup = BrushPopup(self)
             self._brush_popup.show_below(self.brush_btn)
 
+    def _mypaint_preset_ok(self, key):
+        return any(k == key for k, _label in mypaint_engine.brushes())
+
+    def _preset_label(self, key):
+        for k, label in mypaint_engine.brushes():
+            if k == key:
+                return f"MyPaint: {label}"
+        return dab.LABELS.get(key, key)
+
     def _set_brush_preset(self, key):
-        if key not in dab.PRESET_KEYS:
+        if key not in dab.PRESET_KEYS and not self._mypaint_preset_ok(key):
             return
         self.brush_preset = key
         if self.mode != "brush":
             self._set_mode("brush")
-        self.status_changed.emit(dab.LABELS[key])
+        self.status_changed.emit(self._preset_label(key))
         self._show_size_preview()
         self._save_settings()
 
     def _tuning_for(self, key):
-        p = dab.PRESETS[key]
+        p = dab.PRESETS.get(key) or dab.PRESETS[dab.DEFAULT_PRESET]
         return self.brush_tuning.get(key, (p.hardness, p.spacing))
 
     def _set_brush_tuning(self, hardness=None, spacing=None):
         key = self.brush_preset
-        if key == dab.CLASSIC:
+        if key not in dab.PRESETS:
             return
         h, s = self._tuning_for(key)
         self.brush_tuning[key] = (h if hardness is None else hardness, s if spacing is None else spacing)
@@ -2117,6 +2131,20 @@ class Overlay(QWidget):
             self.history.redo_stack.clear()
             self._refresh_history_buttons()
             return
+        if self.brush_preset.startswith(mypaint_engine.PREFIX) and not use_eraser and mypaint_engine.available():
+            # MyPaint engine: libmypaint gets every raw input event with its
+            # time step and does its own smoothing and dynamics.
+            self.current.brush = mypaint_engine.spec(self.brush_preset[len(mypaint_engine.PREFIX):])
+            self.current.dtimes = [0.0]
+            first = self.pressure if self._input_has_pressure else mypaint_engine.MOUSE_PRESSURE
+            self._mp_has_pressure = self._input_has_pressure
+            self.current.points.append((QPointF(pos), first))
+            self._mp_last_time = time.monotonic()
+            self._mp = mypaint_engine.StrokePainter(self.current, self._canvas_dpr())
+            self._feed_mypaint([(pos.x(), pos.y(), first, 0.0)])
+            self.history.redo_stack.clear()
+            self._refresh_history_buttons()
+            return
         if self.brush_preset != dab.CLASSIC:
             # Dab engine. Without real pen pressure, full pressure and
             # tapered ends.
@@ -2152,6 +2180,18 @@ class Overlay(QWidget):
             self.cursor_pos = QPointF(pos)
             self._shape_raw_end = QPointF(pos)
             self._update_shape_end()
+            self._mark_dirty(prev_cursor, self.cursor_pos)
+            return
+        if self._mp is not None:
+            prev_cursor = self.cursor_pos
+            self.cursor_pos = QPointF(pos)
+            now = time.monotonic()
+            dt = max(1e-4, now - self._mp_last_time)
+            self._mp_last_time = now
+            pr = (pressure if pressure > 0 else 0.0) if self._mp_has_pressure else mypaint_engine.MOUSE_PRESSURE
+            self.current.points.append((QPointF(pos), pr))
+            self.current.dtimes.append(dt)
+            self._feed_mypaint([(pos.x(), pos.y(), pr, dt)])
             self._mark_dirty(prev_cursor, self.cursor_pos)
             return
         raw = QPointF(pos)
@@ -2225,6 +2265,17 @@ class Overlay(QWidget):
     # Catmull-Rom segment i depends only on points i-1..i+2, so a small
     # overlap reproduces the same curve as a full-stroke recompute.
     _LIVE_LAYER_OVERLAP = 3
+
+    def _feed_mypaint(self, events):
+        changed = self._mp.add(events)
+        if changed is None:
+            return
+        piece = self._mp.read(changed)
+        if piece is not None:
+            # The surface holds the stroke so far; a piece replaces what the
+            # live layer had there.
+            self._merge_live(*piece, replace=True)
+            self._update_doc_rect(QRectF(brush.logical_rect(piece[1], piece[0])))
 
     def _update_doc_rect(self, rect):
         """Repaint a stroke-coordinate rect."""
@@ -2304,18 +2355,22 @@ class Overlay(QWidget):
         painter.restore()
         painter.drawPixmap(trect.topLeft(), merged)
 
-    def _merge_live(self, new_pixmap, new_origin):
+    def _merge_live(self, new_pixmap, new_origin, replace=False):
         """Composite a freshly rendered piece onto the live stroke layer,
-        growing the layer when the piece falls outside it."""
+        growing the layer when the piece falls outside it. With replace the
+        piece overwrites that area instead of blending over it."""
         dpr = self._canvas_dpr()
         new_rect = brush.logical_rect(new_origin, new_pixmap)
         if self._live_layer is None:
             self._live_layer, self._live_layer_origin = new_pixmap, new_origin
             return
+        mode = (QPainter.CompositionMode.CompositionMode_Source if replace
+                else QPainter.CompositionMode.CompositionMode_SourceOver)
         old_rect = brush.logical_rect(self._live_layer_origin, self._live_layer)
         if old_rect.contains(new_rect):
             painter = QPainter(self._live_layer)
             try:
+                painter.setCompositionMode(mode)
                 painter.drawPixmap(new_origin - self._live_layer_origin, new_pixmap)
             finally:
                 painter.end()
@@ -2325,6 +2380,7 @@ class Overlay(QWidget):
             painter = QPainter(merged)
             try:
                 painter.drawPixmap(old_rect.topLeft() - union.topLeft(), self._live_layer)
+                painter.setCompositionMode(mode)
                 painter.drawPixmap(new_rect.topLeft() - union.topLeft(), new_pixmap)
             finally:
                 painter.end()
@@ -2385,6 +2441,16 @@ class Overlay(QWidget):
             if (finished.brush is not None and self._dab is not None and len(finished.points) > 1
                     and not finished.brush.taper):
                 self._finish_live_dabs(finished)
+            if self._mp is not None:
+                # The live surface is the final stroke: cache it rather than
+                # replaying every event on pen-up.
+                layer = self._mp.layer()
+                if layer is not None:
+                    dab.layer_cache.put(finished, self._canvas_dpr(), layer)
+                else:
+                    finished.points = []  # libmypaint painted nothing
+                self._mp.close()
+                self._mp = None
             shape_rect = self._shape_dirty_rect()
             self._shape_raw_end = None
             if finished.shape is not None and brush.shape_is_degenerate(finished, 2.0 / self._view_scale()):
@@ -3005,7 +3071,7 @@ class Overlay(QWidget):
         drawing, full pressure while hovering."""
         size = self._active_size()
         stroke = self.current
-        if stroke is not None and stroke.brush is not None:
+        if stroke is not None and isinstance(stroke.brush, dab.BrushSpec):
             return dab.diameter(dab.preset_for(stroke.brush), size, self._dab_pressure)
         if self.brush_preset == dab.CLASSIC or self.mode in SHAPES:
             return brush.width_for(size, self._last_effective_pressure)
@@ -3014,7 +3080,7 @@ class Overlay(QWidget):
     def _paint_size_preview(self, painter, center, d):
         """The brush as it will paint: its real stamp at full pressure."""
         painter.save()
-        if self.brush_preset == dab.CLASSIC or self.mode == "eraser":
+        if self.brush_preset not in dab.PRESETS or self.mode == "eraser":
             fill = QColor(255, 255, 255, 120) if self.mode == "eraser" else QColor(self.color)
             if self.mode != "eraser":
                 fill.setAlpha(int(255 * self.opacity))

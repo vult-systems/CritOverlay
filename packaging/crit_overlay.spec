@@ -84,6 +84,10 @@ QT_EXCLUDES = [
 
 # Fonts for the text tool, with their licenses (SIL OFL 1.1).
 datas = [(str(root / "crit_overlay" / "fonts"), "crit_overlay/fonts")]
+# Optional libmypaint comparison engine (exp/shape-tools prototype), staged by
+# third_party/libmypaint/build_libmypaint.py. Shipped only when built.
+if (root / "crit_overlay" / "mypaint" / "mypaint.dll").exists():
+    datas.append((str(root / "crit_overlay" / "mypaint"), "crit_overlay/mypaint"))
 _build_info = root / "build" / "build_info.json"
 if _build_info.exists():
     datas.append((str(_build_info), "."))

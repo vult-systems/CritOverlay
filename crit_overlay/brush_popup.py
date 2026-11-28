@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSlider, QToolButton,
 
 from . import constants as C
 from . import dab
+from . import mypaint_engine
 
 
 class BrushPopup(QFrame):
@@ -34,6 +35,27 @@ class BrushPopup(QFrame):
             row.addWidget(btn)
             self.buttons[key] = btn
         outer.addLayout(row)
+
+        # libmypaint brushes, when the engine is built (comparison).
+        mp = mypaint_engine.brushes()
+        if mp:
+            cap = QLabel("MYPAINT (libmypaint)", self)
+            cap.setObjectName("SliderCaption")
+            outer.addWidget(cap)
+            for start in range(0, len(mp), 5):
+                mrow = QHBoxLayout()
+                mrow.setSpacing(2)
+                for key, label in mp[start:start + 5]:
+                    btn = QToolButton(self)
+                    btn.setText(label)
+                    btn.setAutoRaise(True)
+                    btn.setCheckable(True)
+                    btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+                    btn.clicked.connect(lambda checked=False, k=key: self._pick(k))
+                    mrow.addWidget(btn)
+                    self.buttons[key] = btn
+                mrow.addStretch(1)
+                outer.addLayout(mrow)
 
         self.tuning = QWidget(self)
         tl = QVBoxLayout(self.tuning)
@@ -80,8 +102,8 @@ class BrushPopup(QFrame):
         key = self._overlay.brush_preset
         for k, btn in self.buttons.items():
             btn.setChecked(k == key)
-        self.tuning.setVisible(key != dab.CLASSIC)
-        if key != dab.CLASSIC:
+        self.tuning.setVisible(key in dab.PRESETS)
+        if key in dab.PRESETS:
             h, s = self._overlay._tuning_for(key)
             for slider, value in ((self.hardness, h), (self.spacing, s)):
                 slider.blockSignals(True)
