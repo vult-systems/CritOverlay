@@ -452,6 +452,29 @@ class MarginVisibilityTests(OverlayCase):
         self.assertEqual(shot.pixelColor(int(400 * dpr), int(300 * dpr)).getRgb()[:3], (10, 200, 10),
                          "region in the screenshot")
 
+    def test_margin_is_solid_at_fractional_scale(self):
+        # The margin used to be four bands, each rounding its own edges at
+        # 150%, which left part-filled pixels along the lines where they met.
+        o = self.o
+        o.set_margin_color("white")
+        o.set_margin_opacity(1.0)
+        o.set_margin_size(37)
+        region = QRect(401, 303, 517, 389)
+        o.set_region(region)
+        outer = o.drawable_rect()
+        img = o.grab().toImage()
+        d = img.devicePixelRatio()
+        self.assertEqual(d, 1.5)
+        # Device pixels 2 px clear of the margin's inner and outer edges
+        # (and of the dashed region frame).
+        ox0, oy0 = int(outer.left() * d) + 2, int(outer.top() * d) + 2
+        ox1, oy1 = int((outer.right() + 1) * d) - 2, int((outer.bottom() + 1) * d) - 2
+        rx0, ry0 = int(region.left() * d) - 2, int(region.top() * d) - 2
+        rx1, ry1 = int((region.right() + 1) * d) + 2, int((region.bottom() + 1) * d) + 2
+        bad = [(x, y) for y in range(oy0, oy1) for x in range(ox0, ox1)
+               if not (rx0 <= x < rx1 and ry0 <= y < ry1) and img.pixel(x, y) != 0xFFFFFFFF]
+        self.assertEqual(bad[:5], [], f"{len(bad)} margin pixels not solid")
+
     def test_margin_controls_disabled_without_an_area(self):
         o = self.o
         popup = self.open_popup()

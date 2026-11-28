@@ -12,6 +12,7 @@ from PySide6.QtGui import (
     QGuiApplication,
     QKeySequence,
     QPainter,
+    QPainterPath,
     QPen,
     QInputDevice,
     QPointingDevice,
@@ -1534,9 +1535,16 @@ class Overlay(QWidget):
             if fill is not None:
                 painter.fillRect(self.region, fill)
             if self.margin_enabled and not self.pass_through:
+                # One shape (outer minus region), not four bands: separate
+                # rects each round their own edges at fractional scales and
+                # left empty pixel seams where they met at the corners.
                 band = region_mod.margin_color(self.margin_color, self.margin_opacity)
-                for rect in region_mod.margin_bands(self.region, self.drawable_rect()):
-                    painter.fillRect(rect, band)
+                path = QPainterPath()
+                path.setFillRule(Qt.FillRule.OddEvenFill)
+                path.addRect(QRectF(self.drawable_rect()))
+                path.addRect(QRectF(self.region))
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+                painter.fillPath(path, band)
         painter.restore()
 
     def _commit_stroke_to_canvas(self, stroke):
