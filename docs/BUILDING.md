@@ -203,3 +203,49 @@ python -m crit_overlay
 or `run.bat` (`run_debug.bat` for console logging). `--user` installs need
 no admin rights. `requirements.txt` asks for `PySide6-Essentials`; an
 existing full `PySide6` install also satisfies it.
+
+## Code layout
+
+```
+crit_overlay/
+  __main__.py           python -m entry point
+  launcher.py           pre-Qt startup: options, logging, crash handling, checks
+  app.py                QApplication, overlay and tray wiring
+  compat.py             options, Qt environment cleanup, monitor-mode choice
+  paths.py              where files go, with fallbacks
+  crash.py              crash reports, faulthandler, startup watchdog
+  diagnostics.py        --diagnose report
+  selftest.py           --selftest
+  overlay.py            the drawing widget
+  brush.py              shapes, text and layer helpers (stroke dynamics before the prototype)
+  icons.py              toolbar icons, drawn in code
+  color_popup.py        the color swatch popup
+  capture.py            centered capture: crop, fit, pixel-aligned geometry, export
+  region.py             drawing region and margin geometry, region screenshots
+  region_popup.py       the region and margin popup
+  models.py             strokes and undo history
+  config.py             saved settings
+  logging_setup.py      rotating file logger
+  tray.py               tray icon
+  hotkeys.py            global hotkey parsing and registration
+  instance.py           one running copy per session
+  autostart.py          Start with Windows (Startup-folder shortcut)
+  pass_through_badge.py the way back out of pass-through
+  native_windows.py     Win32 calls (click-through, working set, foreground, system info)
+  icon.py               app icon, drawn in code
+  # Prototype (exp/shape-tools):
+  brushes.py            brush presets, size mapping, stroke layer cache
+  mypaint_engine.py     libmypaint through ctypes
+  brush_popup.py        brush picker and eraser panel
+  brush_preview.py      brush thumbnails rendered by the engine
+  selection.py          select, move and resize for shapes and text
+  text_edit.py          caret and selection for text annotations
+  text_fonts.py         bundled fonts
+  shape_popup.py        shape picker
+  ui_widgets.py         scrub fields, floating panels, menu rows
+  fonts/, lucide/       bundled fonts and icons, with their licenses
+third_party/libmypaint/ build script and glue for the brush engine (prototype)
+packaging/              build script, PyInstaller spec, lock file, verifier
+docs/                   compatibility, deployment, troubleshooting, building
+tests/                  unit tests: python -m unittest discover -s tests -t .
+```
