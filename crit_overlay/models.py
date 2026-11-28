@@ -6,14 +6,20 @@ from PySide6.QtGui import QColor
 
 
 class Stroke:
-    __slots__ = ("color", "size", "opacity", "eraser", "points")
+    __slots__ = ("color", "size", "opacity", "eraser", "points", "shape")
 
-    def __init__(self, color, size, opacity, eraser=False):
+    def __init__(self, color, size, opacity, eraser=False, shape=None):
         self.color = QColor(color)
         self.size = float(size)
         self.opacity = float(opacity)
         self.eraser = eraser
         self.points = []
+        # None for a freehand stroke. Otherwise one of SHAPES, and points
+        # holds exactly two entries: the drag's start and (constrained) end.
+        self.shape = shape
+
+
+SHAPES = ("rect", "ellipse", "line", "arrow")
 
 
 class History:

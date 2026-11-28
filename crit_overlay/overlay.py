@@ -38,10 +38,11 @@ from . import paths
 from . import region as region_mod
 from .color_popup import ColorPopup
 from .config import AppConfig
-from .models import History, Stroke
+from .models import SHAPES, History, Stroke
 from .native_windows import set_click_through
 from .pass_through_badge import PassThroughBadge
 from .region_popup import RegionPopup
+from .shape_popup import SHAPE_LABELS, ShapePopup
 
 logger = logging.getLogger(f"{C.ORG_NAME}.overlay")
 
@@ -118,6 +119,12 @@ class Overlay(QWidget):
 
         self.mode = "brush"
         self._pre_eyedropper_mode = "brush"
+        # The shape the toolbar's shape button selects (see _set_mode).
+        self._last_shape = "rect"
+        self._shape_popup = None
+        # Unconstrained drag end of the shape being drawn, so pressing or
+        # releasing Shift mid-drag can re-apply the constraint.
+        self._shape_raw_end = None
         self.color = QColor(saved["color"])
         # Named brush_size (not `size`) so it never shadows QWidget.size().
         self.brush_size = saved["size"]
@@ -598,6 +605,11 @@ class Overlay(QWidget):
         self.brush_btn.clicked.connect(lambda: self._set_mode("brush"))
         self.eraser_btn.clicked.connect(lambda: self._set_mode("eraser"))
         self.eyedropper_btn.clicked.connect(self._toggle_eyedropper)
+        # One button for all shapes keeps the toolbar compact: it selects
+        # the last used shape, and a click while a shape is active opens
+        # the picker.
+        self.shape_btn = tool_button(self._last_shape, "Shapes (U). Click again to choose", checkable=True)
+        self.shape_btn.clicked.connect(self._on_shape_button)
 
         sep()
 
@@ -682,6 +694,7 @@ class Overlay(QWidget):
         add("B", lambda: self._set_mode("brush"))
         add("E", lambda: self._set_mode("eraser"))
         add("I", self._toggle_eyedropper)
+        add("U", self._cycle_shape)
         add("Ctrl+Z", self.undo)
         add("Ctrl+Shift+Z", self.redo)
         add("F7", self.move_to_next_screen)
@@ -737,7 +750,29 @@ class Overlay(QWidget):
         self.brush_btn.setChecked(mode == "brush")
         self.eraser_btn.setChecked(mode == "eraser")
         self.eyedropper_btn.setChecked(mode == "eyedropper")
+        if mode in SHAPES and mode != self._last_shape:
+            self._last_shape = mode
+            self.shape_btn.setIcon(icons.build_icon(mode))
+        self.shape_btn.setChecked(mode in SHAPES)
         self.update()
+
+    def _on_shape_button(self):
+        # clicked fires after the checkable button toggles itself, so read
+        # the mode rather than the button state.
+        was_shape = self.mode in SHAPES
+        self._set_mode(self._last_shape)
+        if was_shape:
+            if self._shape_popup is None:
+                self._shape_popup = ShapePopup(self)
+            self._shape_popup.show_below(self.shape_btn)
+
+    def _cycle_shape(self):
+        if self.mode in SHAPES:
+            nxt = SHAPES[(SHAPES.index(self.mode) + 1) % len(SHAPES)]
+        else:
+            nxt = self._last_shape
+        self._set_mode(nxt)
+        self.status_changed.emit(SHAPE_LABELS[nxt])
 
     def _toggle_eyedropper(self):
         if self.mode == "eyedropper":
@@ -1096,6 +1131,8 @@ class Overlay(QWidget):
         return self.capture is not None and (self._space_held or self._panning is not None)
 
     def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Shift and self.current is not None and self.current.shape is not None:
+            self._update_shape_end()
         if event.key() == Qt.Key.Key_Space:
             if not event.isAutoRepeat() and self.capture is not None and not self._selecting:
                 self._space_held = True
@@ -1106,6 +1143,8 @@ class Overlay(QWidget):
         super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key.Key_Shift and self.current is not None and self.current.shape is not None:
+            self._update_shape_end()
         if event.key() == Qt.Key.Key_Space:
             if not event.isAutoRepeat():
                 self._space_held = False
@@ -1381,10 +1420,20 @@ class Overlay(QWidget):
         use_eraser = self.mode == "eraser" if eraser is None else (eraser or self.mode == "eraser")
         # Brush size is on-screen size; a fitted (shrunk) capture gets a
         # proportionally larger stroke in image pixels.
-        self.current = Stroke(self.color, self.brush_size / self._view_scale(), self.opacity, use_eraser)
+        shape = self.mode if self.mode in SHAPES and not use_eraser else None
+        self.current = Stroke(self.color, self.brush_size / self._view_scale(), self.opacity, use_eraser, shape)
         self._live_layer = None
         self._live_layer_origin = None
         self._live_baked_index = 0
+        if shape is not None:
+            # Two points, start and end, both at the press. No lazy brush.
+            self.lazy_pos = None
+            self._shape_raw_end = QPointF(pos)
+            self._last_effective_pressure = brush.SHAPE_PRESSURE
+            self.current.points = [(QPointF(pos), brush.SHAPE_PRESSURE), (QPointF(pos), brush.SHAPE_PRESSURE)]
+            self.history.redo_stack.clear()
+            self._refresh_history_buttons()
+            return
         # Seed the first point immediately (rather than waiting for enough
         # movement to pass the lazy-brush radius) so a plain tap still
         # leaves a dot instead of silently drawing nothing.
@@ -1396,6 +1445,13 @@ class Overlay(QWidget):
 
     def _add_point(self, pos, pressure):
         if self.pass_through or not self.current:
+            return
+        if self.current.shape is not None:
+            prev_cursor = self.cursor_pos
+            self.cursor_pos = QPointF(pos)
+            self._shape_raw_end = QPointF(pos)
+            self._update_shape_end()
+            self._mark_dirty(prev_cursor, self.cursor_pos)
             return
         raw = QPointF(pos)
         prev_cursor = self.cursor_pos
@@ -1432,6 +1488,32 @@ class Overlay(QWidget):
             self._last_point_time = now
             self._extend_live_layer()
         self._mark_dirty(prev_cursor, raw, prev_lazy, self.lazy_pos)
+
+    def _update_shape_end(self):
+        """Re-place the live shape's end from the raw drag point and the
+        current Shift state, and refresh its preview layer."""
+        stroke = self.current
+        if stroke is None or stroke.shape is None or self._shape_raw_end is None:
+            return
+        old = self._shape_dirty_rect()
+        start = stroke.points[0][0]
+        end = self._shape_raw_end
+        if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
+            end = brush.constrain_end(stroke.shape, start, end)
+        stroke.points[-1] = (QPointF(end), brush.SHAPE_PRESSURE)
+        layer = brush.render_shape_layer(stroke, self._canvas_dpr())
+        self._live_layer, self._live_layer_origin = layer if layer else (None, None)
+        self.update(old.united(self._shape_dirty_rect()))
+
+    def _shape_dirty_rect(self):
+        """Window rect covering the live shape (arrowheads can reach past
+        the dirty margin around its two points)."""
+        if self.current is None or self.current.shape is None:
+            return QRect()
+        bounds = QRectF(brush.shape_bounds(self.current))
+        if self.capture is not None:
+            bounds = self.capture.transform().mapRect(bounds)
+        return bounds.toAlignedRect().adjusted(-2, -2, 2, 2)
 
     # How many already-baked trailing points to recompute with each new one.
     # Catmull-Rom segment i depends only on points i-1..i+2, so a small
@@ -1487,6 +1569,11 @@ class Overlay(QWidget):
     def _end_stroke(self):
         if self.current:
             finished = self.current
+            shape_rect = self._shape_dirty_rect()
+            self._shape_raw_end = None
+            if finished.shape is not None and brush.shape_is_degenerate(finished, 2.0 / self._view_scale()):
+                # A click without a drag: nothing to commit.
+                finished.points = []
             self.current = None
             self.lazy_pos = None
             self._live_layer = None
@@ -1497,6 +1584,8 @@ class Overlay(QWidget):
                 self._commit_stroke_to_canvas(finished)
                 self._refresh_history_buttons()
                 self._mark_dirty(*(p for p, _ in finished.points))
+                if finished.shape is not None:
+                    self.update(shape_rect)
             else:
                 self.update()
 
@@ -1747,6 +1836,15 @@ class Overlay(QWidget):
         self.update(rect)
 
     def _draw_stroke(self, painter, stroke):
+        if stroke.shape is not None:
+            layer = brush.render_shape_layer(stroke, self._canvas_dpr())
+            if layer is not None:
+                pixmap, origin = layer
+                painter.save()
+                painter.setOpacity(max(0.01, min(1.0, stroke.opacity)))
+                painter.drawPixmap(origin, pixmap)
+                painter.restore()
+            return
         segments = brush.stroke_segments(stroke)
         if not segments:
             return

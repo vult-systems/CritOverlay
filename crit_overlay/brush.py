@@ -22,7 +22,7 @@ applies the ratio.
 import math
 
 from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
 
 CATMULL_ROM_SAMPLES = 6
 
@@ -182,6 +182,93 @@ def render_stroke_layer(stroke, segments, dpr=1.0):
         color = QColor(stroke.color)
         color.setAlpha(255)
         paint_segments(painter, segments, color)
+    finally:
+        painter.end()
+    return layer, bounds.topLeft()
+
+
+# -- shapes ------------------------------------------------------------------
+#
+# A shape is a Stroke with .shape set and two points, start and end. It is
+# rendered through the same opaque-layer path as a freehand stroke, at the
+# constant width a mouse stroke gets, so it composites, erases, undoes and
+# exports like any other stroke.
+
+SHAPE_PRESSURE = 0.65
+ARROW_HEAD_ANGLE = math.radians(28)
+
+
+def shape_width(size):
+    return width_for(size, effective_pressure(SHAPE_PRESSURE, 0.0))
+
+
+def constrain_end(shape, start, end):
+    """Shift-constraint: squares and circles for rect/ellipse, 45-degree
+    steps for line/arrow."""
+    dx, dy = end.x() - start.x(), end.y() - start.y()
+    if shape in ("rect", "ellipse"):
+        side = max(abs(dx), abs(dy))
+        return QPointF(start.x() + math.copysign(side, dx or 1.0), start.y() + math.copysign(side, dy or 1.0))
+    length = math.hypot(dx, dy)
+    step = math.pi / 4
+    angle = round(math.atan2(dy, dx) / step) * step
+    return QPointF(start.x() + length * math.cos(angle), start.y() + length * math.sin(angle))
+
+
+def shape_path(stroke):
+    """The shape's outline as a QPainterPath, in stroke coordinates."""
+    (a, _), (b, _) = stroke.points[0], stroke.points[-1]
+    path = QPainterPath()
+    if stroke.shape == "rect":
+        path.addRect(QRectF(a, b).normalized())
+    elif stroke.shape == "ellipse":
+        path.addEllipse(QRectF(a, b).normalized())
+    else:
+        path.moveTo(a)
+        path.lineTo(b)
+        if stroke.shape == "arrow":
+            dx, dy = b.x() - a.x(), b.y() - a.y()
+            length = math.hypot(dx, dy)
+            if length > 0:
+                w = shape_width(stroke.size)
+                head = min(max(w * 3.0, 10.0), length * 0.5)
+                back = math.atan2(-dy, -dx)
+                for side in (-1, 1):
+                    ang = back + side * ARROW_HEAD_ANGLE
+                    path.moveTo(b)
+                    path.lineTo(b.x() + head * math.cos(ang), b.y() + head * math.sin(ang))
+    return path
+
+
+def shape_bounds(stroke, margin=3.0):
+    pad = shape_width(stroke.size) / 2 + margin
+    return shape_path(stroke).boundingRect().adjusted(-pad, -pad, pad, pad).toAlignedRect()
+
+
+def shape_is_degenerate(stroke, min_extent):
+    (a, _), (b, _) = stroke.points[0], stroke.points[-1]
+    return max(abs(b.x() - a.x()), abs(b.y() - a.y())) < min_extent
+
+
+def render_shape_layer(stroke, dpr=1.0):
+    """Like render_stroke_layer, for a shape. Returns (pixmap, origin) or
+    None."""
+    if len(stroke.points) < 2:
+        return None
+    bounds = shape_bounds(stroke)
+    if bounds.width() <= 0 or bounds.height() <= 0:
+        return None
+    layer = new_layer(bounds.size(), dpr)
+    painter = QPainter(layer)
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.translate(-bounds.topLeft())
+        color = QColor(stroke.color)
+        color.setAlpha(255)
+        painter.setPen(QPen(color, shape_width(stroke.size), Qt.PenStyle.SolidLine,
+                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(shape_path(stroke))
     finally:
         painter.end()
     return layer, bounds.topLeft()

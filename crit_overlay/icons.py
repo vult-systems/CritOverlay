@@ -249,7 +249,36 @@ def region_glyph(painter, color, size):
     painter.drawRect(QRectF(size * 0.34, size * 0.34, size * 0.32, size * 0.32))
 
 
+def rect_glyph(painter, color, size):
+    painter.setPen(_stroke_pen(color, size * 0.09))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawRect(QRectF(size * 0.20, size * 0.26, size * 0.60, size * 0.48))
+
+
+def ellipse_glyph(painter, color, size):
+    painter.setPen(_stroke_pen(color, size * 0.09))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawEllipse(QRectF(size * 0.18, size * 0.26, size * 0.64, size * 0.48))
+
+
+def line_glyph(painter, color, size):
+    painter.setPen(_stroke_pen(color, size * 0.09))
+    painter.drawLine(QPointF(size * 0.22, size * 0.78), QPointF(size * 0.78, size * 0.22))
+
+
+def arrow_glyph(painter, color, size):
+    painter.setPen(_stroke_pen(color, size * 0.09))
+    tip = QPointF(size * 0.78, size * 0.22)
+    painter.drawLine(QPointF(size * 0.22, size * 0.78), tip)
+    painter.drawLine(tip, QPointF(size * 0.48, size * 0.24))
+    painter.drawLine(tip, QPointF(size * 0.76, size * 0.52))
+
+
 _GLYPHS = {
+    "rect": rect_glyph,
+    "ellipse": ellipse_glyph,
+    "line": line_glyph,
+    "arrow": arrow_glyph,
     "brush": brush_glyph,
     "eraser": eraser_glyph,
     "undo": undo_glyph,
