@@ -29,7 +29,7 @@ class ChromeTests(CaptureCase):
         o = self.o
         buttons = [w for w in o.panel.findChildren(QToolButton) if not w.isHidden()]
         expected = [o.select_btn, o.brush_btn, o.eraser_btn, o.shape_btn, o.text_btn, o.eyedropper_btn,
-                    o.undo_btn, o.redo_btn, o.capture_btn, o.snap_btn, o.more_btn]
+                    o.undo_btn, o.redo_btn, o.clear_btn, o.capture_btn, o.snap_btn, o.more_btn]
         buttons = [b for b in buttons if not o.props_bar.isAncestorOf(b)]
         self.assertEqual(set(buttons), set(expected))
         for b in expected:
@@ -133,7 +133,7 @@ class ChromeTests(CaptureCase):
         o = self.o
         m = o.more_menu
         for w in (o.snap_menu_btn, o.pass_btn, o.hide_ui_btn, o.capture_menu_btn, o.region_btn, o.backdrop_btn,
-                  o.backdrop_opacity_slider, o.clear_btn, o.exit_btn, o.folder_btn, o.prefs_btn):
+                  o.backdrop_opacity_slider, o.exit_btn, o.folder_btn, o.prefs_btn):
             self.assertIs(w.window(), m)
         for w in (o.smoothing_slider, o.autostart_btn, *o.pressure_buttons.values()):
             self.assertIs(w.window(), o.prefs_popup, "preferences live in their own popup")

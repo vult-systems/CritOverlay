@@ -281,3 +281,48 @@ def claim_foreground(hwnd):
     except Exception:
         logger.debug("claim_foreground failed", exc_info=True)
         return False
+
+
+# Pen gestures. Without these Windows holds back the start of a pen stroke
+# while it decides whether you're pressing and holding (for a right-click)
+# or flicking, then delivers the held movement at once: a hesitation at
+# pen-down and a snap. Drawing apps opt out per window.
+_TABLET_DISABLE_PRESSANDHOLD = 0x00000001
+_TABLET_DISABLE_PENTAPFEEDBACK = 0x00000008
+_TABLET_DISABLE_PENBARRELFEEDBACK = 0x00000010
+_TABLET_DISABLE_FLICKS = 0x00010000
+_TABLET_DISABLE_FLICKFALLBACKKEYS = 0x00100000
+_PEN_SERVICE_FLAGS = (_TABLET_DISABLE_PRESSANDHOLD | _TABLET_DISABLE_PENTAPFEEDBACK
+                      | _TABLET_DISABLE_PENBARRELFEEDBACK | _TABLET_DISABLE_FLICKS
+                      | _TABLET_DISABLE_FLICKFALLBACKKEYS)
+# FEEDBACK_TYPE values for SetWindowFeedbackSetting (pen visuals).
+_PEN_FEEDBACK = (2, 3, 4, 5, 6)  # barrel, tap, double tap, press-and-hold, right tap
+
+_k32.GlobalAddAtomW.argtypes = [wintypes.LPCWSTR]
+_k32.GlobalAddAtomW.restype = wintypes.ATOM
+_user32.SetPropW.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.HANDLE]
+_user32.SetPropW.restype = wintypes.BOOL
+
+
+def disable_pen_gestures(hwnd):
+    """Turn off press-and-hold, flicks and the pen feedback visuals for
+    `hwnd`, so pen input is delivered as it happens. Returns True when the
+    window property was set."""
+    ok = False
+    try:
+        atom = _k32.GlobalAddAtomW("MicrosoftTabletPenServiceProperty")
+        if atom:
+            ok = bool(_user32.SetPropW(wintypes.HWND(int(hwnd)), ctypes.c_wchar_p(atom),
+                                       wintypes.HANDLE(_PEN_SERVICE_FLAGS)))
+    except Exception:
+        logger.debug("MicrosoftTabletPenServiceProperty failed", exc_info=True)
+    try:
+        fn = _user32.SetWindowFeedbackSetting  # Windows 8+
+        fn.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.DWORD, wintypes.UINT, ctypes.c_void_p]
+        fn.restype = wintypes.BOOL
+        off = wintypes.BOOL(False)
+        for feedback in _PEN_FEEDBACK:
+            fn(wintypes.HWND(int(hwnd)), feedback, 0, ctypes.sizeof(off), ctypes.byref(off))
+    except Exception:
+        logger.debug("SetWindowFeedbackSetting failed", exc_info=True)
+    return ok

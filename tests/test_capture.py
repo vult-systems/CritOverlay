@@ -254,14 +254,15 @@ class CaptureTests(CaptureCase):
         self.draw_line((900, 600), (1020, 600))
         self.assertEqual(self.painted(960, 600)[:3], GRAB_COLOR.getRgb()[:3])
 
-    def test_esc_with_capture_returns_to_selection(self):
+    def test_esc_with_capture_hides_and_keeps_it(self):
         self.capture(QRect(50, 60, 400, 300))
         o = self.o
+        cap = o.capture
         with mock.patch.object(o, "dismiss") as dismiss:
             o._escape()
-        dismiss.assert_not_called()
-        self.assertIsNone(o.capture)
-        self.assertTrue(o._selecting)
+        dismiss.assert_called_once()
+        self.assertIs(o.capture, cap, "the capture survives Esc")
+        self.assertFalse(o._selecting, "no new selection, no full-monitor switch")
 
     def test_esc_without_capture_hides(self):
         o = self.o
@@ -667,8 +668,7 @@ class CaptureTests(CaptureCase):
         o.mouseMoveEvent(QMouseEvent(QEvent.Type.MouseMove, QPointF(900, 600), QPointF(900, 600),
                                      Qt.MouseButton.NoButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier))
         self.assertIsNotNone(o.cursor_pos)
-        with mock.patch.object(o, "dismiss"):
-            o._escape()
+        o.end_capture()
         self.assertIsNone(o.cursor_pos)
 
     def test_select_on_show(self):

@@ -205,7 +205,10 @@ def _toolbar_checks(overlay, results):
     overlay.redo_btn.click()
     after_redo = len(overlay.history) == 1
     overlay.clear_btn.click()
-    cleared = len(overlay.history) == 0 and not overlay.undo_btn.isEnabled()
+    cleared = len(overlay.history) == 0 and overlay.undo_btn.isEnabled()  # Clear all is undoable
+    overlay.undo()
+    cleared = cleared and len(overlay.history) == 1
+    overlay.clear()
     results.check("Undo / Redo / Clear buttons", enabled and after_undo and after_redo and cleared)
 
     _click_at(overlay, overlay.panel.geometry().center())

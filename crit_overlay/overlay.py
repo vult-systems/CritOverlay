@@ -194,6 +194,11 @@ class Overlay(QWidget):
         self._strokes_to_log = 5      # summaries for the first strokes after each show
         self._stroke_log_start = 0
         self._stroke_foreground = None
+        self._pen_gestures_logged = False
+        # The capture and history set aside while selecting a new area, so
+        # Esc (or a failed grab) can bring them back; dropped when the new
+        # capture or full-monitor drawing actually starts.
+        self._stashed_session = None
         self.backdrop = saved["backdrop"]
         self.backdrop_opacity = saved["backdrop_opacity"]
         self.pass_through = False
@@ -385,6 +390,10 @@ class Overlay(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        if QGuiApplication.platformName() == "windows":
+            if native_windows.disable_pen_gestures(int(self.winId())) and not self._pen_gestures_logged:
+                self._pen_gestures_logged = True
+                logger.info("Pen press-and-hold, flicks and pen feedback off for the overlay")
         self._alignment_retries = 1
         self._alignment_timer.start(250)
         if self._resume_on_show:
@@ -782,6 +791,9 @@ class Overlay(QWidget):
         self.redo_btn = tool("redo", "Redo (Ctrl+Shift+Z)")
         self.undo_btn.clicked.connect(self.undo)
         self.redo_btn.clicked.connect(self.redo)
+        self._separator(panel, top)
+        self.clear_btn = tool("clear", "Clear all annotations (undo brings them back)")
+        self.clear_btn.clicked.connect(self.clear)
         top.addStretch(1)
         self.capture_btn = tool("region", "Capture an area to annotate (R)")
         self.snap_btn = tool("snapshot", "Screenshot with annotations (F9)")
@@ -1073,7 +1085,6 @@ class Overlay(QWidget):
         self.fit_btn = item("fit", "Fit capture to screen", "Ctrl+0", "Frame the whole capture", self.frame_capture)
         self.actual_btn = item("actual", "Actual pixels", "Ctrl+1", "One image pixel per screen pixel",
                                self.actual_pixels)
-        self.clear_btn = item("clear", "Clear all", "", "Remove every annotation (undoable)", self.clear)
 
         self._menu_heading(menu, v, "EXPORT")
         self.snap_menu_btn = item("snapshot", "Screenshot", "F9", "Save a screenshot with your annotations",
@@ -2094,14 +2105,16 @@ class Overlay(QWidget):
             return
         if self.current is not None:
             self._end_stroke()
-        # Selecting again replaces the capture, like a new snip.
+        # Selecting again replaces the capture, like a new snip, once the new
+        # area is actually captured. Until then the old capture and its
+        # history are kept aside, so Esc can return to them.
         if self.capture is not None:
-            self.end_capture()
+            self._stash_session()
         self._selecting = True
         self._selection_anchor = None
         self._selection_point = None
         self.setCursor(Qt.CursorShape.CrossCursor)
-        self.status_changed.emit("Drag to capture an area. Click to draw on the full monitor, Esc to hide")
+        self.status_changed.emit("Drag to capture an area. Click to draw on the full monitor, Esc to go back")
 
     def _finish_region_selection(self, end_pos):
         anchor = self._selection_anchor
@@ -2112,6 +2125,7 @@ class Overlay(QWidget):
         if region_mod.is_usable(rect):
             self._start_capture(rect)
         else:
+            self._stashed_session = None  # a deliberate click: full-monitor drawing
             self.set_region(None)
             self.status_changed.emit("Drawing on the full monitor. R to capture an area")
 
@@ -2187,7 +2201,40 @@ class Overlay(QWidget):
             return
         self._enter_capture(capture_mod.Capture(grab, rect))
 
+    def _stash_session(self):
+        self._cancel_text()
+        if self.current is not None:
+            self._end_stroke()
+        self._set_selection(None)
+        self._stashed_session = (self.capture, self.history)
+        self.history = History(C.MAX_STROKE_HISTORY)
+        self.capture = None
+        self._live_layer = None
+        self._panning = None
+        self.cursor_pos = None
+        self.lazy_pos = None
+        self._rebuild_canvas()
+        self._refresh_history_buttons()
+        self._refresh_region_button()
+        self.update()
+
+    def _restore_stashed_session(self):
+        """Back to the capture and history that were set aside when a new
+        selection started. Returns True if there was one."""
+        if self._stashed_session is None:
+            return False
+        self.capture, self.history = self._stashed_session
+        self._stashed_session = None
+        self.region = None
+        self._rebuild_canvas()
+        self._refresh_history_buttons()
+        self._refresh_region_button()
+        self._sync_region_popup()
+        self.update()
+        return True
+
     def _enter_capture(self, cap):
+        self._stashed_session = None
         if self.current is not None:
             self._end_stroke()
         self.region = None
@@ -2205,7 +2252,7 @@ class Overlay(QWidget):
         s = cap.size()
         logger.info("Captured %dx%d at %gx from %s", round(s.width()), round(s.height()), cap.dpr,
                     f"{cap.source_rect.x()},{cap.source_rect.y()}")
-        self.status_changed.emit("Space+drag moves it. F9 saves, Esc captures again")
+        self.status_changed.emit("Space+drag moves it. F9 saves, R captures again, Esc hides")
 
     def end_capture(self):
         """Discard the capture and its strokes."""
@@ -2484,21 +2531,41 @@ class Overlay(QWidget):
             self._adjust_input("release", QPointF())
 
     def _escape(self):
-        # With a capture, Esc discards it and goes straight back to
-        # selecting a new area. Otherwise (selecting, or drawing on the
-        # full monitor) it hides the overlay.
+        """Esc backs out of whatever is in progress, one thing at a time,
+        and otherwise hides to the tray. It never discards a capture or
+        switches to full-monitor drawing; those take a deliberate action.
+        (Text editing handles its own Esc: cancel the edit.)"""
         if self._grabbing:
+            return
+        if self._adjust is not None:
+            self._adjust_input("release", QPointF())
+            return
+        if self._drag is not None:
+            self._cancel_manipulation()
+            return
+        if self.current is not None and self.current.shape is not None:
+            self.current = None
+            self._live_layer = None
+            self._shape_raw_end = None
+            self.update()
             return
         if self.selection is not None:
             self._set_selection(None)
             return
-        if self.capture is not None:
-            self.end_capture()
-            self.begin_region_selection()
-            return
         if self._selecting:
             self._cancel_selection_state()
+            self._restore_stashed_session()
         self.dismiss()
+
+    def _cancel_manipulation(self):
+        """Put a moved or resized annotation back where it was."""
+        self._drag = None
+        self._floating = None
+        self._text_dragging = False
+        if self._hidden_stroke is not None:
+            self._hidden_stroke = None
+            self._rebuild_canvas()
+        self.update()
 
     def _selection_input(self, kind, pos):
         """Mouse or pen input while selecting an area. kind: press, move,
@@ -2744,14 +2811,21 @@ class Overlay(QWidget):
             self.update()
 
     def clear(self):
+        """Remove every annotation as one undoable step. The captured image,
+        margin and backdrop stay."""
         self._cancel_text()
-        if len(self.history) == 0 and self.current is None:
+        if self.current is not None:
+            self.current = None
+            self._live_layer = None
+        if len(self.history) == 0:
+            self.update()
             return
-        self.history.clear()
-        self.current = None
+        self._set_selection(None)
+        self.history.change(list(self.history.strokes), [])
         self._rebuild_canvas()
         self._refresh_history_buttons()
         self.update()
+        self.status_changed.emit("Cleared. Ctrl+Z brings it back")
 
     def _refresh_history_buttons(self):
         if self.selection is not None and not self.history.contains(self.selection):
@@ -2933,7 +3007,14 @@ class Overlay(QWidget):
             finally:
                 painter.end()
         else:
+            # Grow with headroom, so a stroke heading off the layer doesn't
+            # reallocate and copy the whole layer on every event. On the
+            # 4 px grid that keeps copies on whole device pixels.
             union = old_rect.united(new_rect)
+            pad = 192
+            union = QRect(union.left() - pad, union.top() - pad, union.width() + 2 * pad, union.height() + 2 * pad)
+            union = QRect(union.left() // 4 * 4, union.top() // 4 * 4,
+                          (union.width() + 7) // 4 * 4, (union.height() + 7) // 4 * 4)
             merged = brush.new_layer(union.size(), dpr)
             painter = QPainter(merged)
             try:
@@ -3729,8 +3810,9 @@ class Overlay(QWidget):
             return
         self._strokes_to_log -= 1
         fg = {True: "yes", False: "NO", None: "?"}[self._stroke_foreground]
-        logger.info("Stroke via %s: %d points, pressure %.2f..%.2f, overlay foreground=%s%s", via, len(pressures),
-                    min(pressures), max(pressures), fg, "  [pen seen, but no pressure]" if suspicious else "")
+        logger.info("Stroke via %s: %d points, pressure %.2f..%.2f, overlay foreground=%s, %s%s", via,
+                    len(pressures), min(pressures), max(pressures), fg, self._stroke_timing(),
+                    "  [pen seen, but no pressure]" if suspicious else "")
         if suspicious or self.show_input_diag:
             events = list(self._input_log)[self._stroke_log_start:]
             t0 = events[0][0] if events else 0
@@ -3740,6 +3822,21 @@ class Overlay(QWidget):
         if self.show_input_diag:
             self._diag["last_stroke"] = f"via {via}, pressure {min(pressures):.2f}..{max(pressures):.2f}, " \
                                         f"foreground {fg}"
+
+    def _stroke_timing(self):
+        """How the input arrived during the stroke: delay from press to the
+        first movement, and the largest gap between events. A long first
+        delay or gap with fast drawing means input was held back before it
+        reached the app."""
+        events = [e for e in list(self._input_log)[self._stroke_log_start:]
+                  if e[2] in ("TabletPress", "TabletMove", "MouseButtonPress", "MouseMove")]
+        if len(events) < 2:
+            return "timing n/a"
+        times = [e[0] for e in events]
+        gaps = [b - a for a, b in zip(times, times[1:])]
+        rate = (len(times) - 1) / max(1e-6, times[-1] - times[0])
+        return (f"first move after {gaps[0] * 1000:.0f} ms, largest gap {max(gaps) * 1000:.0f} ms, "
+                f"{rate:.0f} events/s")
 
     def _note_stroke_pressure(self, pr):
         if self.show_input_diag:
