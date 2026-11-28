@@ -96,10 +96,11 @@ jobs:
               [ "$n" -gt 0 ] && plan=build
             fi
           fi
-          case $plan in
-            reuse) msg="Reusing the windows-2025 build of $sha from CI run $run_id." ;;
-            build) msg="Tree $tree passed full validation; building the release artifact once." ;;
-            full)  msg="No earlier validation of $sha; running all of CI." ;;
+          case $GITHUB_REF_TYPE:$plan in
+            tag:reuse) msg="Reusing the windows-2025 build of $sha from CI run $run_id." ;;
+            tag:build) msg="Tree $tree passed full validation; building the release artifact once." ;;
+            tag:full)  msg="No earlier validation of $sha; running all of CI." ;;
+            *)         msg="Dry run: building once and running the draft checks, without creating a draft." ;;
           esac
           echo "$msg" | tee -a "$GITHUB_STEP_SUMMARY"
           printf 'plan=%s\nrun_id=%s\n' "$plan" "$run_id" >> "$GITHUB_OUTPUT"
