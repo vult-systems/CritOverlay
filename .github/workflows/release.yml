@@ -1,11 +1,19 @@
-# Pushing a version tag (vX.Y.Z or vX.Y.Z-rc.N) runs the full CI and, only if
-# every check passes, creates a DRAFT GitHub release with the CI-built zip
-# and SHA256SUMS.txt. Nothing is published automatically: a person reviews
-# the draft and publishes it, and a stable release is published only after
-# the manual hardware and lab-machine acceptance checklist has passed
-# (docs/COMPATIBILITY.md). Release candidates are drafted as pre-releases.
+# Pushing a version tag (vX.Y.Z or vX.Y.Z-rc.N) on a main commit creates a
+# DRAFT GitHub release with a CI-built zip and SHA256SUMS.txt. Nothing is
+# published automatically: a person reviews the draft and publishes it, and a
+# stable release is published only after the manual hardware and lab-machine
+# acceptance checklist has passed (docs/COMPATIBILITY.md). Release candidates
+# are drafted as pre-releases.
 #
-# Pull requests that change this file run it as a dry run (no draft).
+# The tag, APP_VERSION, changelog section and main ancestry are checked
+# first. The release artifact then comes from the first of:
+#   reuse   a successful CI run on main (push or manual) of the same commit
+#           already built it: same source, version and build inputs
+#   build   a pull request fully validated this exact tree: build.bat on
+#           windows-2025 only (its own audit and self-tests still run)
+#   full    otherwise: all of CI (lint, tests, both builds)
+#
+# Pull requests that change this file run it as a dry run (build, no draft).
 name: Release
 
 on:
@@ -17,45 +25,135 @@ on:
 permissions:
   contents: read
 
-jobs:
-  checks:
-    uses: ./.github/workflows/ci.yml
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-  draft:
-    needs: checks
+jobs:
+  prepare:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-    env:
-      # The artifact the release ships; windows-2022 also builds as a check.
-      RELEASE_ARTIFACT: CritOverlay-win64-windows-2025
-      GH_TOKEN: ${{ github.token }}
+      contents: read
+      actions: read  # find earlier CI runs and validation records
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+      plan: ${{ steps.plan.outputs.plan }}
+      run_id: ${{ steps.plan.outputs.run_id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: ${{ env.RELEASE_ARTIFACT }}
-          path: release
-      - name: Check tag, version, changelog and checksum
+          fetch-depth: 0
+      - name: Check tag, version, changelog and branch
         id: check
         run: |
           set -euo pipefail
-          zip=$(cd release && ls CritOverlay-v*-win64.zip)
-          version=${zip#CritOverlay-v}; version=${version%-win64.zip}
+          version=$(sed -n 's/^APP_VERSION = "\(.*\)"$/\1/p' crit_overlay/constants.py)
+          [ -n "$version" ] || { echo "::error::Can't read APP_VERSION from crit_overlay/constants.py"; exit 1; }
           if [ "$GITHUB_REF_TYPE" = tag ]; then
             tag=$GITHUB_REF_NAME
             [ "$tag" = "v$version" ] || { echo "::error::Tag $tag doesn't match APP_VERSION $version"; exit 1; }
+            git merge-base --is-ancestor HEAD origin/main || { echo "::error::$tag isn't on main"; exit 1; }
           else
             tag=v$version
           fi
           echo "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' \
             || { echo "::error::$tag isn't vX.Y.Z or vX.Y.Z-rc.N"; exit 1; }
-          # build.py writes SHA256SUMS.txt on Windows, so lines end in CRLF.
-          (cd release && tr -d '\r' < SHA256SUMS.txt | grep " $zip\$" | sha256sum -c -)
           # The changelog section for this version becomes the draft notes.
           awk -v h="## $tag" 'index($0, h) == 1 && (length($0) == length(h) || substr($0, length(h) + 1, 1) == " ") {f=1; next}
                               f && /^## / {exit} f' CHANGELOG.md > notes.md
           [ -s notes.md ] || { echo "::error::CHANGELOG.md has no '## $tag' section"; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          case "$tag" in *-rc.*) echo "prerelease=--prerelease" >> "$GITHUB_OUTPUT" ;; *) echo "prerelease=" >> "$GITHUB_OUTPUT" ;; esac
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: notes.md
+          retention-days: 7
+      - name: Choose reuse, build or full
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          tree=$(git rev-parse 'HEAD^{tree}')
+          repo=$GITHUB_REPOSITORY
+          plan=full; run_id=
+          if [ "$GITHUB_REF_TYPE" != tag ]; then
+            plan=build  # dry run: exercise the release build and draft checks
+          else
+            for id in $(gh api "repos/$repo/actions/workflows/ci.yml/runs?head_sha=$sha&status=success&per_page=50" \
+                          --jq '.workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch") | .id'); do
+              if [ -n "$(gh api "repos/$repo/actions/runs/$id/artifacts" \
+                           --jq '.artifacts[] | select(.name == "CritOverlay-win64-windows-2025" and (.expired | not)) | .id')" ]; then
+                plan=reuse; run_id=$id; break
+              fi
+            done
+            if [ "$plan" = full ]; then
+              n=$(gh api "repos/$repo/actions/artifacts?name=ci-validated-$tree" \
+                    --jq '[.artifacts[] | select((.expired | not) and .workflow_run.head_repository_id == .workflow_run.repository_id)] | length') || n=0
+              [ "$n" -gt 0 ] && plan=build
+            fi
+          fi
+          case $plan in
+            reuse) msg="Reusing the windows-2025 build of $sha from CI run $run_id." ;;
+            build) msg="Tree $tree passed full validation; building the release artifact once." ;;
+            full)  msg="No earlier validation of $sha; running all of CI." ;;
+          esac
+          echo "$msg" | tee -a "$GITHUB_STEP_SUMMARY"
+          printf 'plan=%s\nrun_id=%s\n' "$plan" "$run_id" >> "$GITHUB_OUTPUT"
+
+  checks:
+    needs: prepare
+    if: needs.prepare.outputs.plan != 'reuse'
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/ci.yml
+    with:
+      scope: ${{ needs.prepare.outputs.plan == 'build' && 'release-build' || 'full' }}
+
+  draft:
+    needs: [prepare, checks]
+    if: >-
+      always() && needs.prepare.result == 'success'
+      && (needs.checks.result == 'success'
+          || (needs.prepare.outputs.plan == 'reuse' && needs.checks.result == 'skipped'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read  # download a reused artifact from another run
+    env:
+      # The artifact the release ships; windows-2022 also builds as a check.
+      RELEASE_ARTIFACT: CritOverlay-win64-windows-2025
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes
+      - if: needs.prepare.outputs.plan != 'reuse'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ env.RELEASE_ARTIFACT }}
+          path: release
+      - if: needs.prepare.outputs.plan == 'reuse'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ env.RELEASE_ARTIFACT }}
+          path: release
+          run-id: ${{ needs.prepare.outputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Check the zip's version and checksum
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          zip=$(cd release && ls CritOverlay-v*-win64.zip)
+          [ "$zip" = "CritOverlay-$TAG-win64.zip" ] || { echo "::error::$zip wasn't built as $TAG"; exit 1; }
+          # build.py writes SHA256SUMS.txt on Windows, so lines end in CRLF.
+          (cd release && tr -d '\r' < SHA256SUMS.txt | grep " $zip\$" | sha256sum -c -)
           {
             echo
             echo "**SHA-256**"
@@ -63,18 +161,18 @@ jobs:
             cat release/SHA256SUMS.txt
             echo '```'
           } >> notes.md
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          case "$tag" in *-rc.*) echo "prerelease=--prerelease" >> "$GITHUB_OUTPUT" ;; *) echo "prerelease=" >> "$GITHUB_OUTPUT" ;; esac
           cat notes.md
       - name: Create draft release
         if: github.ref_type == 'tag'
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
         run: |
           set -euo pipefail
-          tag=${{ steps.check.outputs.tag }}
-          if gh release view "$tag" >/dev/null 2>&1; then
-            echo "::error::A release for $tag already exists; not replacing it"; exit 1
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::A release for $TAG already exists; not replacing it"; exit 1
           fi
-          gh release create "$tag" --draft ${{ steps.check.outputs.prerelease }} --verify-tag \
-            --title "$tag" --notes-file notes.md \
+          gh release create "$TAG" --draft $PRERELEASE --verify-tag \
+            --title "$TAG" --notes-file notes.md \
             release/CritOverlay-*-win64.zip release/SHA256SUMS.txt
-          echo "Draft release $tag created. Review the notes, then publish it by hand." >> "$GITHUB_STEP_SUMMARY"
+          echo "Draft release $TAG created. Review the notes, then publish it by hand." >> "$GITHUB_STEP_SUMMARY"
