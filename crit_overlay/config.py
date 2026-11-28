@@ -121,7 +121,13 @@ class AppConfig:
             "eraser_size": round(_clamp(self._value("brush/eraser_size", C.DEFAULT_ERASER_SIZE, float),
                                         C.MIN_SIZE, C.MAX_SIZE), 2),
             "brush_tuning": tuning,
+            "pressure_curve": self._pick("brush/pressure_curve", "normal", tuple(C.PRESSURE_CURVES)),
+            "eraser_style": self._pick("brush/eraser_style", "hard", C.ERASER_STYLES),
         }
+
+    def _pick(self, key, default, allowed):
+        value = self._value(key, default, str)
+        return value if value in allowed else default
 
     def _load_text(self):
         # New keys with defaults; older files simply don't have them, so no
@@ -153,13 +159,18 @@ class AppConfig:
              margin_enabled=C.DEFAULT_MARGIN_ENABLED, margin_size=C.DEFAULT_MARGIN_SIZE,
              margin_color=C.DEFAULT_MARGIN_COLOR, margin_opacity=C.DEFAULT_MARGIN_OPACITY,
              text_family=None, text_size=C.DEFAULT_TEXT_SIZE, text_bold=False, text_align="left",
-             eraser_size=None, brush_preset=None, brush_tuning=None):
+             eraser_size=None, brush_preset=None, brush_tuning=None, pressure_curve=None,
+             eraser_style=None):
         self._settings.setValue("brush/color", QColor(color).name())
         self._settings.setValue("brush/size", round(float(size), 2))
         if eraser_size is not None:
             self._settings.setValue("brush/eraser_size", round(float(eraser_size), 2))
         if brush_preset:
             self._settings.setValue("brush/preset", brush_preset)
+        if pressure_curve:
+            self._settings.setValue("brush/pressure_curve", pressure_curve)
+        if eraser_style:
+            self._settings.setValue("brush/eraser_style", eraser_style)
         for key, (h, s) in (brush_tuning or {}).items():
             self._settings.setValue(f"brush/{key}_hardness", round(float(h), 3))
             self._settings.setValue(f"brush/{key}_spacing", round(float(s), 3))

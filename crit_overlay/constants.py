@@ -28,6 +28,11 @@ DEFAULT_SIZE = 12
 MIN_SIZE = 0.5
 MAX_SIZE = 160
 DEFAULT_ERASER_SIZE = 24
+# Pen pressure response: raw pressure is raised to this power before any
+# brush sees it. Soft reaches full strength with a light touch; firm needs
+# more force.
+PRESSURE_CURVES = {"soft": 0.6, "normal": 1.0, "firm": 1.7}
+ERASER_STYLES = ("hard", "soft")
 DEFAULT_OPACITY = 1.0
 DEFAULT_SMOOTHING = 0.0
 DEFAULT_PRESSURE = 0.65

@@ -27,7 +27,31 @@ logger = logging.getLogger(__name__)
 
 DIR = Path(__file__).resolve().parent / "mypaint"
 PREFIX = "mypaint:"
-MOUSE_PRESSURE = 0.5   # what MyPaint itself uses for a mouse
+MOUSE_PRESSURE = 1.0   # full pressure, like the dab engine, so a mouse line matches the ring
+
+# Radius per unit of size for each bundled brush, measured so that its
+# visible line (half its peak opacity) at full pressure is as wide as the
+# size. Brushes differ a lot by design (Textured Ink scatters far past its
+# radius, Airbrush fades well inside it).
+SIZE_SCALE = {
+    "deevad_ballpen.myb": 1.26,
+    "deevad_liner.myb": 1.02,
+    "tanda_pencil-2b.myb": 1.07,
+    "deevad_4H_pencil.myb": 1.2,
+    "classic_textured_ink.myb": 0.3,
+    "classic_calligraphy.myb": 1.5,
+    "tanda_charcoal-01.myb": 0.62,
+    "tanda_marker-01.myb": 0.85,
+    "deevad_airbrush.myb": 1.8,
+}
+
+# Windows Ink reports tilt in degrees, about -60..60; libmypaint wants -1..1.
+TILT_RANGE = 60.0
+
+
+def tilt(x_degrees, y_degrees):
+    clamp = lambda v: max(-1.0, min(1.0, v / TILT_RANGE))  # noqa: E731
+    return clamp(x_degrees), clamp(y_degrees)
 _GRID = 4              # see dab._GRID
 
 MypaintSpec = namedtuple("MypaintSpec", "engine brush")
@@ -139,8 +163,9 @@ class StrokePainter:
         # stroke units) at this pixel density; its pressure curves still
         # scale it from there.
         s = lib.settings
+        scale = SIZE_SCALE.get(stroke.brush.brush, 1.0)
         lib.mypaint_brush_set_base_value(self.brush, s["radius_logarithmic"],
-                                         math.log(max(0.2, stroke.size * self.dpr / 2.0)))
+                                         math.log(max(0.2, stroke.size * scale * self.dpr / 2.0)))
         c = stroke.color
         h = c.hsvHueF()
         lib.mypaint_brush_set_base_value(self.brush, s["color_h"], 0.0 if h < 0 else h)
@@ -153,8 +178,8 @@ class StrokePainter:
         self.started = False
 
     def add(self, events):
-        """events: [(x, y, pressure, dtime)] in stroke units. Returns the
-        device rect (x0, y0, x1, y1) that changed, or None."""
+        """events: [(x, y, pressure, dtime, xtilt, ytilt)] in stroke units.
+        Returns the device rect (x0, y0, x1, y1) that changed, or None."""
         lib, d = self.lib, self.dpr
         lib.mypaint_surface_begin_atomic(self.surface)
         if events and not self.started:
@@ -164,8 +189,8 @@ class StrokePainter:
             x, y = events[0][0] * d, events[0][1] * d
             lib.mypaint_brush_stroke_to(self.brush, self.surface, x, y, 0.0, 0.0, 0.0, 10.0)
             self.started = True
-        for x, y, pressure, dt in events:
-            lib.mypaint_brush_stroke_to(self.brush, self.surface, x * d, y * d, pressure, 0.0, 0.0, dt)
+        for x, y, pressure, dt, xt, yt in events:
+            lib.mypaint_brush_stroke_to(self.brush, self.surface, x * d, y * d, pressure, xt, yt, dt)
         roi = _Rect()
         lib.mypaint_surface_end_atomic(self.surface, ctypes.byref(roi))
         if roi.width <= 0 or roi.height <= 0:
@@ -208,7 +233,9 @@ class StrokePainter:
 
 
 def events_of(stroke):
-    return [(p.x(), p.y(), pr, dt) for (p, pr), dt in zip(stroke.points, stroke.dtimes or ())]
+    tilts = stroke.tilts or [(0.0, 0.0)] * len(stroke.points)
+    return [(p.x(), p.y(), pr, dt, xt, yt)
+            for (p, pr), dt, (xt, yt) in zip(stroke.points, stroke.dtimes or (), tilts)]
 
 
 def stroke_layer(stroke, dpr):
@@ -225,5 +252,5 @@ def stroke_layer(stroke, dpr):
 
 def bounds_pad(stroke):
     # Brushes can scatter dabs a few radii from the line.
-    return stroke.size * 3 + 8
+    return stroke.size * SIZE_SCALE.get(stroke.brush.brush, 1.0) * 3 + 8
 

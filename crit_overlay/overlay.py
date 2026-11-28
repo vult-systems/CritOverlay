@@ -172,6 +172,10 @@ class Overlay(QWidget):
         self._live_tail = None       # provisional last segment, (pixmap, origin)
         self._input_has_pressure = False
         self._size_preview_until = 0.0
+        self.pressure_curve = saved["pressure_curve"]
+        self.eraser_style = saved["eraser_style"]
+        self._eraser_popup = None
+        self._tilt = (0.0, 0.0)      # last pen tilt, libmypaint units
         self._mp = None              # mypaint_engine.StrokePainter while drawing
         self._mp_last_time = 0.0
         if self.brush_preset.startswith(mypaint_engine.PREFIX) and not self._mypaint_preset_ok(self.brush_preset):
@@ -665,7 +669,7 @@ class Overlay(QWidget):
         self.eraser_btn.setChecked(self.mode == "eraser")
         self.eyedropper_btn.setChecked(self.mode == "eyedropper")
         self.brush_btn.clicked.connect(self._on_brush_button)
-        self.eraser_btn.clicked.connect(lambda: self._set_mode("eraser"))
+        self.eraser_btn.clicked.connect(self._on_eraser_button)
         self.eyedropper_btn.clicked.connect(self._toggle_eyedropper)
         # One button for all shapes keeps the toolbar compact: it selects
         # the last used shape, and a click while a shape is active opens
@@ -1306,6 +1310,8 @@ class Overlay(QWidget):
             eraser_size=self.eraser_size,
             brush_preset=self.brush_preset,
             brush_tuning=self.brush_tuning,
+            pressure_curve=self.pressure_curve,
+            eraser_style=self.eraser_style,
         )
 
     # State setters. Every mutable tool property goes through one of these,
@@ -1346,14 +1352,38 @@ class Overlay(QWidget):
                 self._brush_popup = BrushPopup(self)
             self._brush_popup.show_below(self.brush_btn)
 
+    def _on_eraser_button(self):
+        was_eraser = self.mode == "eraser"
+        self._set_mode("eraser")
+        if was_eraser:
+            if self._eraser_popup is None:
+                from .brush_popup import EraserPopup
+                self._eraser_popup = EraserPopup(self)
+            self._eraser_popup.show_below(self.eraser_btn)
+
+    def _set_eraser_style(self, style):
+        if style not in C.ERASER_STYLES:
+            return
+        self.eraser_style = style
+        self.status_changed.emit("Soft eraser" if style == "soft" else "Hard eraser")
+        self._show_size_preview()
+        self._save_settings()
+
+    def _set_pressure_curve(self, name):
+        if name in C.PRESSURE_CURVES:
+            self.pressure_curve = name
+            self.status_changed.emit(f"Pressure: {name}")
+            self._save_settings()
+
+    def _curved(self, pressure):
+        return max(0.0, min(1.0, pressure)) ** C.PRESSURE_CURVES.get(self.pressure_curve, 1.0)
+
     def _mypaint_preset_ok(self, key):
         return any(k == key for k, _label in mypaint_engine.brushes())
 
     def _preset_label(self, key):
-        for k, label in mypaint_engine.brushes():
-            if k == key:
-                return f"MyPaint: {label}"
-        return dab.LABELS.get(key, key)
+        from .brush_popup import label_for
+        return label_for(key)
 
     def _set_brush_preset(self, key):
         if key not in dab.PRESET_KEYS and not self._mypaint_preset_ok(key):
@@ -1380,7 +1410,7 @@ class Overlay(QWidget):
 
     def _brush_spec(self, eraser, taper):
         if eraser:
-            return dab.make_spec("eraser")
+            return dab.make_spec("eraser_soft" if self.eraser_style == "soft" else "eraser")
         h, s = self._tuning_for(self.brush_preset)
         return dab.make_spec(self.brush_preset, h, s, taper)
 
@@ -2136,12 +2166,13 @@ class Overlay(QWidget):
             # time step and does its own smoothing and dynamics.
             self.current.brush = mypaint_engine.spec(self.brush_preset[len(mypaint_engine.PREFIX):])
             self.current.dtimes = [0.0]
+            self.current.tilts = [self._tilt]
             first = self.pressure if self._input_has_pressure else mypaint_engine.MOUSE_PRESSURE
             self._mp_has_pressure = self._input_has_pressure
             self.current.points.append((QPointF(pos), first))
             self._mp_last_time = time.monotonic()
             self._mp = mypaint_engine.StrokePainter(self.current, self._canvas_dpr())
-            self._feed_mypaint([(pos.x(), pos.y(), first, 0.0)])
+            self._feed_mypaint([(pos.x(), pos.y(), first, 0.0, *self._tilt)])
             self.history.redo_stack.clear()
             self._refresh_history_buttons()
             return
@@ -2183,16 +2214,25 @@ class Overlay(QWidget):
             self._mark_dirty(prev_cursor, self.cursor_pos)
             return
         if self._mp is not None:
+            # Same stabilizer as the other engines (the SMOOTH slider), then
+            # every event goes to libmypaint with its time step, so its own
+            # dynamics see a steady stream even while the lazy point rests.
             prev_cursor = self.cursor_pos
             self.cursor_pos = QPointF(pos)
+            if self.smoothing > 0.02:
+                self._advance_lazy(QPointF(pos))
+            else:
+                self.lazy_pos = QPointF(pos)
+            at = QPointF(self.lazy_pos)
             now = time.monotonic()
             dt = max(1e-4, now - self._mp_last_time)
             self._mp_last_time = now
             pr = (pressure if pressure > 0 else 0.0) if self._mp_has_pressure else mypaint_engine.MOUSE_PRESSURE
-            self.current.points.append((QPointF(pos), pr))
+            self.current.points.append((at, pr))
             self.current.dtimes.append(dt)
-            self._feed_mypaint([(pos.x(), pos.y(), pr, dt)])
-            self._mark_dirty(prev_cursor, self.cursor_pos)
+            self.current.tilts.append(self._tilt)
+            self._feed_mypaint([(at.x(), at.y(), pr, dt, *self._tilt)])
+            self._mark_dirty(prev_cursor, self.cursor_pos, at)
             return
         raw = QPointF(pos)
         prev_cursor = self.cursor_pos
@@ -2201,22 +2241,9 @@ class Overlay(QWidget):
         self.pressure = pressure if pressure > 0 else C.DEFAULT_PRESSURE
 
         view_scale = self._view_scale()
-        radius = (2 + self.smoothing * 44) / view_scale
-        dx = raw.x() - self.lazy_pos.x()
-        dy = raw.y() - self.lazy_pos.y()
-        dist = (dx * dx + dy * dy) ** 0.5
-
-        if dist <= radius:
+        if not self._advance_lazy(raw):
             self._mark_dirty(prev_cursor, raw)
             return
-
-        pull = (dist - radius) / dist
-        target = QPointF(self.lazy_pos.x() + dx * pull, self.lazy_pos.y() + dy * pull)
-        ease = 0.72 - self.smoothing * 0.22
-        self.lazy_pos = QPointF(
-            self.lazy_pos.x() + (target.x() - self.lazy_pos.x()) * ease,
-            self.lazy_pos.y() + (target.y() - self.lazy_pos.y()) * ease,
-        )
 
         last_point, _ = self.current.points[-1]
         moved = ((last_point.x() - self.lazy_pos.x()) ** 2 + (last_point.y() - self.lazy_pos.y()) ** 2) ** 0.5
@@ -2234,6 +2261,25 @@ class Overlay(QWidget):
             self._last_point_time = now
             self._extend_live_layer()
         self._mark_dirty(prev_cursor, raw, prev_lazy, self.lazy_pos)
+
+    def _advance_lazy(self, raw):
+        """The stabilizer shared by all engines: a lazy point trails the pen
+        on a string whose length grows with SMOOTH, and eases toward it.
+        Returns False while the pen is still within the string's slack."""
+        radius = (2 + self.smoothing * 44) / self._view_scale()
+        dx = raw.x() - self.lazy_pos.x()
+        dy = raw.y() - self.lazy_pos.y()
+        dist = (dx * dx + dy * dy) ** 0.5
+        if dist <= radius:
+            return False
+        pull = (dist - radius) / dist
+        target = QPointF(self.lazy_pos.x() + dx * pull, self.lazy_pos.y() + dy * pull)
+        ease = 0.72 - self.smoothing * 0.22
+        self.lazy_pos = QPointF(
+            self.lazy_pos.x() + (target.x() - self.lazy_pos.x()) * ease,
+            self.lazy_pos.y() + (target.y() - self.lazy_pos.y()) * ease,
+        )
+        return True
 
     def _update_shape_end(self):
         """Re-place the live shape's end from the raw drag point and the
@@ -2543,7 +2589,7 @@ class Overlay(QWidget):
             else:
                 self._zero_pressure_run = 0
         self._input_has_pressure = True
-        return max(0.01, raw)
+        return max(0.01, self._curved(raw))
 
     def _mark_no_pressure(self, key, why):
         if key not in self._no_pressure_devices:
@@ -2554,6 +2600,7 @@ class Overlay(QWidget):
     def _handle_tablet_event(self, event):
         event_type = event.type()
         pressure = self._tablet_pressure(event)
+        self._tilt = mypaint_engine.tilt(event.xTilt(), event.yTilt())
         pos = self._overlay_pos(event)
         is_eraser_tip = event.pointerType() == QPointingDevice.PointerType.Eraser
 
@@ -2663,6 +2710,7 @@ class Overlay(QWidget):
                     event.accept()
                     return
                 self._input_has_pressure = False
+                self._tilt = (0.0, 0.0)
                 self._begin_stroke(self._to_doc(pos), 0.65)
                 event.accept()
         except Exception:

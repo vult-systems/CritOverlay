@@ -24,6 +24,7 @@ from PySide6.QtGui import QGuiApplication, QMouseEvent
 from . import app as app_module
 from . import constants as C
 from . import dab
+from . import mypaint_engine
 from . import diagnostics
 from . import hotkeys
 from . import native_windows
@@ -124,6 +125,7 @@ def _run_checks(app, overlay, opts, results):
     results.check("Clear empties the canvas", len(overlay.history) == 0 and not _canvas_has_ink(overlay))
 
     _toolbar_checks(overlay, results)
+    _brush_engine_checks(overlay, results)
 
     screen = QGuiApplication.primaryScreen()
     grab = screen.grabWindow(0, 0, 0, 4, 4)
@@ -139,6 +141,30 @@ def _run_checks(app, overlay, opts, results):
         results.check("Screenshot folder writable", True, str(writable))
 
     results.check("Log file location available", paths.current().log_dir is not None, str(paths.current().log_dir))
+
+
+def _brush_engine_checks(overlay, results):
+    """The optional libmypaint engine, when bundled: the DLL loads in this
+    (frozen) process and a stroke through it reaches the canvas."""
+    if not (mypaint_engine.DIR / "mypaint.dll").exists():
+        results.warn("MyPaint engine not bundled", str(mypaint_engine.DIR))
+        return
+    results.check("MyPaint engine loads", mypaint_engine.available(), str(mypaint_engine.DIR))
+    brushes = mypaint_engine.brushes()
+    if not brushes:
+        results.check("MyPaint brushes found", False)
+        return
+    original = overlay.brush_preset
+    try:
+        overlay._set_brush_preset(brushes[0][0])
+        _draw_test_stroke(overlay)
+        stroke = overlay.history.strokes[-1] if len(overlay.history) else None
+        results.check("MyPaint stroke reaches the canvas",
+                      stroke is not None and mypaint_engine.is_spec(stroke.brush) and _canvas_has_ink(overlay),
+                      brushes[0][1])
+    finally:
+        overlay.clear()
+        overlay._set_brush_preset(original)
 
 
 def _click_at(overlay, local_point):

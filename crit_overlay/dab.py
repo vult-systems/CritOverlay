@@ -38,10 +38,11 @@ from . import brush
 
 class Preset:
     __slots__ = ("key", "label", "hardness", "spacing", "min_size", "size_gamma", "flow",
-                 "opacity_pressure", "grain", "jitter", "aspect", "angle", "taper")
+                 "opacity_pressure", "grain", "jitter", "aspect", "angle", "taper", "size_scale")
 
     def __init__(self, key, label, hardness, spacing, min_size, flow, size_gamma=1.0,
-                 opacity_pressure=0.0, grain=0.0, jitter=0.0, aspect=1.0, angle=0.0, taper=True):
+                 opacity_pressure=0.0, grain=0.0, jitter=0.0, aspect=1.0, angle=0.0, taper=True,
+                 size_scale=1.0):
         self.key = key
         self.label = label
         self.hardness = hardness      # 0 soft .. 1 hard edge
@@ -55,18 +56,25 @@ class Preset:
         self.aspect = aspect          # stamp height / width
         self.angle = angle            # stamp rotation, degrees
         self.taper = taper            # taper ends of strokes without pressure
+        # Dab diameter per unit of size, measured so that every preset's
+        # visible line (half its peak opacity) at full pressure is as wide
+        # as the size, and as the brush ring.
+        self.size_scale = size_scale
 
 
 PRESETS = OrderedDict((p.key, p) for p in (
     Preset("pen", "Studio Pen", hardness=0.92, spacing=0.07, min_size=0.08, flow=1.0, size_gamma=1.15),
     Preset("soft", "Soft Brush", hardness=0.0, spacing=0.06, min_size=0.5, flow=0.9,
-           opacity_pressure=0.75),
+           opacity_pressure=0.75, size_scale=1.75),
     Preset("pencil", "Pencil", hardness=0.7, spacing=0.1, min_size=0.6, flow=0.97,
-           opacity_pressure=0.75, grain=0.5, jitter=0.05),
+           opacity_pressure=0.75, grain=0.5, jitter=0.05, size_scale=1.23),
     Preset("marker", "Marker", hardness=0.8, spacing=0.05, min_size=0.85, flow=1.0,
-           aspect=0.45, angle=-35.0),
+           aspect=0.45, angle=-35.0, size_scale=1.5),
 ))
 ERASER = Preset("eraser", "Eraser", hardness=0.85, spacing=0.07, min_size=0.35, flow=1.0, taper=False)
+SOFT_ERASER = Preset("eraser_soft", "Soft Eraser", hardness=0.0, spacing=0.06, min_size=0.5, flow=0.7,
+                     opacity_pressure=0.8, taper=False, size_scale=1.75)
+ERASERS = {"eraser": ERASER, "eraser_soft": SOFT_ERASER}
 CLASSIC = "classic"
 DEFAULT_PRESET = "pen"
 PRESET_KEYS = tuple(PRESETS) + (CLASSIC,)
@@ -82,11 +90,11 @@ PRESSURE_EASE = 0.55    # smoothing of raw pen pressure between events
 
 
 def preset_for(spec):
-    return ERASER if spec.preset == "eraser" else PRESETS.get(spec.preset, PRESETS[DEFAULT_PRESET])
+    return ERASERS.get(spec.preset) or PRESETS.get(spec.preset, PRESETS[DEFAULT_PRESET])
 
 
 def make_spec(key, hardness=None, spacing=None, taper=False):
-    p = ERASER if key == "eraser" else PRESETS[key]
+    p = ERASERS.get(key) or PRESETS[key]
     h = p.hardness if hardness is None else max(0.0, min(1.0, hardness))
     s = p.spacing if spacing is None else max(0.02, min(0.5, spacing))
     return BrushSpec(key, h, s, bool(taper and p.taper))
@@ -94,7 +102,7 @@ def make_spec(key, hardness=None, spacing=None, taper=False):
 
 def diameter(preset, size, pressure):
     p = max(0.0, min(1.0, pressure))
-    return size * (preset.min_size + (1.0 - preset.min_size) * p ** preset.size_gamma)
+    return size * preset.size_scale * (preset.min_size + (1.0 - preset.min_size) * p ** preset.size_gamma)
 
 
 def _flow(preset, spacing, pressure):
@@ -150,7 +158,7 @@ class DabRenderer:
         self.dist = 0.0
         self.total = total_length
         self.size = stroke.size
-        self.taper_len = max(3.0 * self.size, 4.0)
+        self.taper_len = max(3.0 * self.size * self.preset.size_scale, 4.0)
 
     def clone(self):
         dup = DabRenderer.__new__(DabRenderer)
@@ -440,7 +448,8 @@ def freehand_bounds(stroke):
     if mypaint_engine.is_spec(stroke.brush):
         pad = mypaint_engine.bounds_pad(stroke)
     else:
-        pad = stroke.size * (1 + preset_for(stroke.brush).jitter * 2) / 2 + 2
+        p = preset_for(stroke.brush)
+        pad = stroke.size * p.size_scale * (1 + p.jitter * 2) / 2 + 2
     return QRectF(min(xs) - pad, min(ys) - pad, max(xs) - min(xs) + 2 * pad, max(ys) - min(ys) + 2 * pad)
 
 

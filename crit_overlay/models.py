@@ -7,7 +7,7 @@ from PySide6.QtGui import QColor, QTransform
 
 
 class Stroke:
-    __slots__ = ("color", "size", "opacity", "eraser", "points", "shape", "text", "font", "erasures", "brush", "dtimes", "__weakref__")
+    __slots__ = ("color", "size", "opacity", "eraser", "points", "shape", "text", "font", "erasures", "brush", "dtimes", "tilts", "__weakref__")
 
     def __init__(self, color, size, opacity, eraser=False, shape=None):
         self.color = QColor(color)
@@ -34,6 +34,7 @@ class Stroke:
         # MyPaint engine strokes: the time step before each point, so the
         # stroke replays exactly (libmypaint's dynamics depend on timing).
         self.dtimes = None
+        self.tilts = None  # MyPaint strokes: (xtilt, ytilt) per point, -1..1
 
     def copy(self):
         dup = Stroke(self.color, self.size, self.opacity, self.eraser, self.shape)
@@ -43,6 +44,7 @@ class Stroke:
             dup.font = TextStyle(self.font.family, self.font.bold, self.font.align)
         dup.brush = self.brush
         dup.dtimes = None if self.dtimes is None else list(self.dtimes)
+        dup.tilts = None if self.tilts is None else list(self.tilts)
         dup.erasures = tuple((e, QTransform(t)) for e, t in self.erasures)
         return dup
 
