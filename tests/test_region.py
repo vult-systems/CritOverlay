@@ -321,6 +321,24 @@ class OverlayRegionTests(OverlayCase):
         self.assertEqual(o.region, QRect(300, 300, 400, 300))
         self.assertEqual(len(o.history), 0)
 
+    def test_tray_screenshot_while_hidden_keeps_the_toolbar(self):
+        # #25: tray > Screenshot with the overlay hidden (as here: never
+        # shown) hid the toolbar for the grab and never brought it back.
+        o = self.o
+        o.panel.show()
+        self.assertFalse(o.isVisible())
+        screen = o._target_screen
+        pm = QPixmap(100, 100)
+        pm.fill(QColor(10, 200, 10))
+        with mock.patch.object(overlay_module.QTimer, "singleShot") as later, \
+                mock.patch.object(overlay_module.QGuiApplication, "screenAt", return_value=screen), \
+                mock.patch.object(type(screen), "grabWindow", lambda *_a: pm), \
+                mock.patch.object(o, "_save_screenshot", return_value=None):
+            o.capture_annotated()
+            self.assertTrue(o.panel.isHidden(), "hidden for the grab")
+            later.call_args[0][1]()
+        self.assertFalse(o.panel.isHidden(), "toolbar back afterwards")
+
     def test_toolbar_click_while_selecting_is_ignored(self):
         o = self.o
         o.show()  # the toolbar only counts as visible on a shown overlay

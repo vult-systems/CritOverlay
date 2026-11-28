@@ -1692,7 +1692,10 @@ class Overlay(QWidget):
 
     def capture_annotated(self):
         try:
-            panel_vis = self.panel.isVisible()
+            # The toolbar's own hidden flag, not isVisible(): from the tray
+            # while the overlay is hidden, isVisible() is False and the
+            # toolbar would never come back (#25).
+            panel_vis = not self.panel.isHidden()
             toast_vis = self.toast_label.isVisible()
             cursor_pos = QCursor.pos()
             self.panel.hide()
