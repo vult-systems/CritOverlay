@@ -99,4 +99,5 @@ In effect from 2026-11-25 until v1.5.0 is tagged stable after #4 passes. The acc
 
 ## Current state
 
+- **Repository settings:** `main` is protected: PR required (0 approvals), `lint`, the four `test` jobs and both `build` jobs required (`reproducibility` is informational), conversations resolved, no force-push or deletion. Merged branches are deleted automatically. Private vulnerability reporting is on (`SECURITY.md`). Renaming a CI job means updating the required checks.
 - **Releases:** v1.4.2 is the stable release. v1.5.0-rc.4 is the current pre-release and the frozen acceptance baseline, pending #4. It supersedes rc.3 (tray, hotkey, single instance, #14), rc.2 (annotation margin fix, #13) and rc.1 (built locally before CI existed).
