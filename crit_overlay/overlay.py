@@ -4,7 +4,7 @@ import subprocess
 import time
 from datetime import datetime
 
-from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal, QEvent
+from PySide6.QtCore import QMimeData, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal, QEvent
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -38,6 +38,7 @@ from . import icons
 from . import native_windows
 from . import paths
 from . import region as region_mod
+from . import selection as sel_mod
 from . import text_fonts
 from .color_popup import ColorPopup
 from .config import AppConfig
@@ -46,6 +47,7 @@ from .native_windows import set_click_through
 from .pass_through_badge import PassThroughBadge
 from .region_popup import RegionPopup
 from .shape_popup import SHAPE_LABELS, ShapePopup
+from .text_edit import TextEditor
 
 logger = logging.getLogger(f"{C.ORG_NAME}.overlay")
 
@@ -135,6 +137,19 @@ class Overlay(QWidget):
         self.text_bold = saved["text_bold"]
         self.text_align = saved["text_align"]
         self._text_edit = None
+        self._editor = None          # TextEditor for _text_edit
+        self._text_original = None   # committed text being re-edited
+        self._text_dragging = False  # dragging a text selection
+        # Select tool. selection is a committed shape or text annotation.
+        # While it is dragged, _floating is its moved/resized preview and
+        # the canvas is rebuilt without _hidden_stroke (the original).
+        self.selection = None
+        self._floating = None
+        self._hidden_stroke = None
+        self._drag = None
+        self._last_select_press = (0.0, None)
+        self._annotation_clipboard = None
+        self._paste_count = 0
         self.color = QColor(saved["color"])
         # Named brush_size (not `size`) so it never shadows QWidget.size().
         self.brush_size = saved["size"]
@@ -620,6 +635,8 @@ class Overlay(QWidget):
             layout.addWidget(btn)
             return btn
 
+        self.select_btn = tool_button("select", "Select and move (V)", checkable=True)
+        self.select_btn.clicked.connect(lambda: self._set_mode("select"))
         self.brush_btn = tool_button("brush", "Brush (B)", checkable=True)
         self.eraser_btn = tool_button("eraser", "Eraser (E)", checkable=True)
         self.eyedropper_btn = tool_button("eyedropper", "Eyedropper (Alt+click)", checkable=True)
@@ -773,109 +790,174 @@ class Overlay(QWidget):
         # The toolbar counts as off only when hidden on purpose (screenshot,
         # pass-through); before the first show every child reports hidden.
         panel_off = self.panel.isHidden() and self.panel.testAttribute(Qt.WidgetAttribute.WA_WState_ExplicitShowHide)
-        show = self.mode == "text" and not panel_off
+        text_selected = self.selection is not None and self.selection.shape == "text"
+        show = (self.mode == "text" or text_selected) and not panel_off
         if show != (not bar.isHidden()):
             bar.setVisible(show)
             if show:
                 bar.raise_()
             self._place_chrome()
 
-    def _text_style_changed(self):
+    def _text_style_changed(self, what=None):
         te = self._text_edit
+        style = TextStyle(self.text_family, self.text_bold, self.text_align)
+        size = self.text_size / self._view_scale()
         if te is not None:
-            te.font = TextStyle(self.text_family, self.text_bold, self.text_align)
-            te.size = self.text_size / self._view_scale()
+            te.font = style
+            te.size = size
             self.setFocus()
             self.update()
+        elif self.selection is not None and self.selection.shape == "text" and what is not None:
+            def apply(s):
+                if what == "size":
+                    s.size = size
+                else:
+                    s.font = style
+            self._modify_selection(apply, merge_key="text_" + what)
         self._save_settings()
 
     def _set_text_family(self, family):
         self.text_family = family
-        self._text_style_changed()
+        self._text_style_changed("family")
 
     def _set_text_size(self, value):
         self.text_size = int(value)
         self.text_size_label.setText(f"{self.text_size}px")
-        self._text_style_changed()
+        self._text_style_changed("size")
 
     def _set_text_bold(self, bold):
         self.text_bold = bool(bold)
         self.bold_btn.setChecked(self.text_bold)
-        self._text_style_changed()
+        self._text_style_changed("bold")
 
     def _set_text_align(self, align):
         self.text_align = align
         for a, btn in self.align_btns.items():
             btn.setChecked(a == align)
-        self._text_style_changed()
+        self._text_style_changed("align")
 
     # -- text editing -------------------------------------------------------
 
-    def _text_press(self, pos):
-        """A press in stroke coordinates. Returns True if the text tool
-        handled it: a click outside the text being edited commits it, and
-        with the text tool a click on the canvas starts new text."""
-        te = self._text_edit
-        if te is not None:
-            if not brush.text_rect(te).adjusted(-8, -8, 8, 8).contains(pos):
-                self._commit_text()
-            return True
-        if self.mode != "text":
-            return False
-        if self.pass_through:
-            return True
+    def _in_drawable(self, pos):
         if self.capture is not None:
-            if not self._doc_outer().contains(QPointF(pos)):
-                return True
-        elif self.region is not None and not self.drawable_rect().contains(QPointF(pos).toPoint()):
-            return True
-        te = Stroke(self.color, self.text_size / self._view_scale(), self.opacity, shape="text")
-        te.font = TextStyle(self.text_family, self.text_bold, self.text_align)
-        te.points = [(QPointF(pos), brush.SHAPE_PRESSURE)]
-        self._text_edit = te
+            return self._doc_outer().contains(QPointF(pos))
+        return self.region is None or self.drawable_rect().contains(QPointF(pos).toPoint())
+
+    def _begin_text(self, stroke, original=None, caret_at=None):
+        """Start typing into `stroke`. With `original`, it is a copy of that
+        committed annotation, which is hidden from the canvas meanwhile."""
+        self._text_edit = stroke
+        self._editor = TextEditor(stroke)
+        self._text_original = original
+        if original is not None:
+            self._hidden_stroke = original
+            self._rebuild_canvas()
+            if caret_at is not None:
+                self._editor.place(caret_at)
         self.history.redo_stack.clear()
         self._refresh_history_buttons()
         self.activateWindow()
         self.setFocus()
         self.update()
-        return True
+
+    def _end_text_edit(self):
+        te, original = self._text_edit, self._text_original
+        self._text_edit = self._editor = self._text_original = None
+        self._text_dragging = False
+        if self._hidden_stroke is not None:
+            self._hidden_stroke = None
+            self._rebuild_canvas()
+        return te, original
 
     def _commit_text(self):
-        te = self._text_edit
-        if te is None:
+        if self._text_edit is None:
             return
-        self._text_edit = None
-        if te.text.strip():
+        te, original = self._end_text_edit()
+        keep = bool(te.text.strip())
+        if original is not None:
+            self.history.change([original], [te] if keep else [])
+            self._rebuild_canvas()
+            self.selection = te if keep and self.mode == "select" else None
+        elif keep:
             self.history.commit(te)
             self._commit_stroke_to_canvas(te)
-            self._refresh_history_buttons()
+        self._refresh_history_buttons()
+        self._sync_text_bar()
         self.update()
 
     def _cancel_text(self):
         if self._text_edit is not None:
-            self._text_edit = None
+            self._end_text_edit()
             self.update()
 
-    def _text_key(self, event):
+    def _annotation_press(self, pos, modifiers=Qt.KeyboardModifier.NoModifier):
+        """A press in stroke coordinates for the text and select tools.
+        Returns True if handled (the press must not start a stroke)."""
         te = self._text_edit
+        if te is not None:
+            if brush.text_rect(te).adjusted(-8, -8, 8, 8).contains(pos):
+                self._editor.place(pos, extend=bool(modifiers & Qt.KeyboardModifier.ShiftModifier))
+                self._text_dragging = True
+                self.update()
+                return True
+            self._commit_text()
+            if self.mode != "select":
+                return True  # a click outside only commits
+        if self.mode == "select":
+            self._select_press(pos)
+            return True
+        if self.mode != "text":
+            return False
+        if self.pass_through or not self._in_drawable(pos):
+            return True
+        stroke = Stroke(self.color, self.text_size / self._view_scale(), self.opacity, shape="text")
+        stroke.font = TextStyle(self.text_family, self.text_bold, self.text_align)
+        stroke.points = [(QPointF(pos), brush.SHAPE_PRESSURE)]
+        self._begin_text(stroke)
+        return True
+
+    def _text_key(self, event):
+        ed = self._editor
         key = event.key()
-        ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        mods = event.modifiers()
+        ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+        shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+        moves = {
+            Qt.Key.Key_Left: "word_left" if ctrl else "left",
+            Qt.Key.Key_Right: "word_right" if ctrl else "right",
+            Qt.Key.Key_Up: "up",
+            Qt.Key.Key_Down: "down",
+            Qt.Key.Key_Home: "start" if ctrl else "home",
+            Qt.Key.Key_End: "finish" if ctrl else "end",
+        }
+        clipboard = QApplication.clipboard()
         if key == Qt.Key.Key_Escape:
             self._cancel_text()
         elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             if ctrl:
                 self._commit_text()
             else:
-                te.text += "\n"
+                ed.insert("\n")
         elif key == Qt.Key.Key_Backspace:
-            te.text = te.text[:-1]
-        elif key == Qt.Key.Key_V and ctrl:
-            pasted = QApplication.clipboard().text().replace("\r\n", "\n").replace("\r", "\n")
-            te.text += "".join(ch for ch in pasted if ch == "\n" or ch.isprintable())
+            ed.backspace()
+        elif key == Qt.Key.Key_Delete:
+            ed.delete()
+        elif key in moves:
+            ed.move(moves[key], extend=shift)
+        elif ctrl and key == Qt.Key.Key_A:
+            ed.select_all()
+        elif ctrl and key in (Qt.Key.Key_C, Qt.Key.Key_X):
+            if ed.has_selection():
+                clipboard.setText(ed.selected_text())
+                if key == Qt.Key.Key_X:
+                    ed.insert("")
+        elif ctrl and key == Qt.Key.Key_V:
+            pasted = clipboard.text().replace("\r\n", "\n").replace("\r", "\n")
+            ed.insert("".join(ch for ch in pasted if ch == "\n" or ch.isprintable()))
         else:
             typed = event.text()
             if typed and typed.isprintable():
-                te.text += typed
+                ed.insert(typed)
         event.accept()
         self.update()
 
@@ -907,11 +989,223 @@ class Overlay(QWidget):
         painter.setBrush(Qt.BrushStyle.NoBrush)
         pad = 4 / self._view_scale()
         painter.drawRect(brush.text_rect(te).adjusted(-pad, -pad, pad, pad))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(77, 171, 247, 90))
+        for rect in self._editor.selection_rects():
+            painter.drawRect(rect)
         caret = QPen(QColor(te.color), 2)
         caret.setCosmetic(True)
         painter.setPen(caret)
-        painter.drawLine(*brush.text_caret(te))
+        painter.drawLine(*self._editor.caret_line())
         painter.restore()
+
+    def _paint_floating(self, painter, stroke):
+        layer = brush.render_shape_layer(stroke, self._canvas_dpr())
+        if layer is None:
+            return
+        pixmap, origin = layer
+        painter.save()
+        painter.setOpacity(max(0.01, min(1.0, stroke.opacity)))
+        painter.drawPixmap(origin, pixmap)
+        painter.restore()
+
+    _HANDLE_PX = 7
+
+    def _paint_selection(self, painter):
+        """Outline and handles, in window coordinates at a fixed on-screen
+        size. Painted on the window only, never into the canvas, and not
+        while capturing, so they never reach a screenshot."""
+        stroke = self._floating or self.selection
+        rect = sel_mod.bounds(stroke)
+        tl, br = self._to_view(rect.topLeft()), self._to_view(rect.bottomRight())
+        view_rect = QRectF(tl, br).normalized().adjusted(-3, -3, 3, 3)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(0, 0, 0, 140), 1))
+        painter.drawRect(view_rect)
+        painter.setPen(QPen(QColor(77, 171, 247, 230), 1, Qt.PenStyle.DashLine))
+        painter.drawRect(view_rect)
+        h = self._HANDLE_PX
+        painter.setPen(QPen(QColor(77, 171, 247), 1))
+        painter.setBrush(QColor(255, 255, 255))
+        for point in sel_mod.handles(stroke).values():
+            v = self._to_view(point)
+            painter.drawRect(QRectF(v.x() - h / 2, v.y() - h / 2, h, h))
+        painter.restore()
+
+    # -- select tool ----------------------------------------------------------
+
+    def _select_tolerance(self):
+        return 6 / self._view_scale()
+
+    def _set_selection(self, stroke):
+        if stroke is self.selection:
+            return
+        self.selection = stroke
+        if stroke is not None and stroke.shape == "text":
+            self._show_text_style(stroke)
+        self._sync_text_bar()
+        self.update()
+
+    def _show_text_style(self, stroke):
+        """Point the text bar at a selected text, without editing it."""
+        self.text_family = stroke.font.family
+        self.text_bold = stroke.font.bold
+        self.text_align = stroke.font.align
+        self.text_size = int(max(C.MIN_TEXT_SIZE, min(C.MAX_TEXT_SIZE, round(stroke.size * self._view_scale()))))
+        for widget in (self.font_combo, self.text_size_slider, self.bold_btn, *self.align_btns.values()):
+            widget.blockSignals(True)
+        self.font_combo.setCurrentText(self.text_family)
+        self.text_size_slider.setValue(self.text_size)
+        self.text_size_label.setText(f"{self.text_size}px")
+        self.bold_btn.setChecked(self.text_bold)
+        for a, btn in self.align_btns.items():
+            btn.setChecked(a == self.text_align)
+        for widget in (self.font_combo, self.text_size_slider, self.bold_btn, *self.align_btns.values()):
+            widget.blockSignals(False)
+
+    def _modify_selection(self, fn, merge_key=None):
+        old = self.selection
+        new = old.copy()
+        fn(new)
+        self._replace_selection(new, merge_key)
+
+    def _replace_selection(self, new, merge_key=None):
+        self.history.change([self.selection], [new], merge_key)
+        self.selection = new
+        self._rebuild_canvas()
+        self._refresh_history_buttons()
+        self.update()
+
+    def _select_press(self, pos):
+        now = time.monotonic()
+        last_time, last_hit = self._last_select_press
+        tol = self._select_tolerance()
+        if self.selection is not None:
+            handle = sel_mod.handle_at(self.selection, pos, tol)
+            if handle is not None:
+                self._drag = {"kind": "resize", "handle": handle, "start": QPointF(pos),
+                              "orig": self.selection, "moved": False}
+                return
+        hit = sel_mod.topmost_hit(self.history, pos, tol)
+        self._last_select_press = (now, hit)
+        self._set_selection(hit)
+        if hit is None:
+            return
+        double = hit is last_hit and now - last_time < QApplication.doubleClickInterval() / 1000.0
+        if double and hit.shape == "text":
+            self._last_select_press = (0.0, None)
+            self._begin_text(hit.copy(), original=hit, caret_at=pos)
+            return
+        self._drag = {"kind": "move", "handle": None, "start": QPointF(pos), "orig": hit, "moved": False}
+
+    def _annotation_move(self, pos):
+        if self._text_dragging and self._editor is not None:
+            self._editor.place(pos, extend=True)
+            self.update()
+            return
+        drag = self._drag
+        if drag is None:
+            return
+        dx, dy = pos.x() - drag["start"].x(), pos.y() - drag["start"].y()
+        if not drag["moved"]:
+            if max(abs(dx), abs(dy)) * self._view_scale() < 3:
+                return
+            drag["moved"] = True
+            self._hidden_stroke = drag["orig"]
+            self._rebuild_canvas()
+        if drag["kind"] == "move":
+            self._floating = sel_mod.translated(drag["orig"], dx, dy)
+        else:
+            self._floating = sel_mod.resized(drag["orig"], drag["handle"], pos)
+        self.update()
+
+    def _annotation_release(self):
+        self._text_dragging = False
+        drag, self._drag = self._drag, None
+        if drag is None or not drag["moved"]:
+            return
+        floating, self._floating = self._floating, None
+        self._hidden_stroke = None
+        if floating is not None:
+            self._replace_selection(floating)
+        else:
+            self._rebuild_canvas()
+            self.update()
+
+    def _offset_copy(self, stroke):
+        self._paste_count += 1
+        step = 16 * self._paste_count / self._view_scale()
+        return sel_mod.translated(stroke, step, step)
+
+    def _add_annotation(self, stroke):
+        self.history.commit(stroke)
+        self._commit_stroke_to_canvas(stroke)
+        if self.mode != "select":
+            self._set_mode("select")
+        self._set_selection(stroke)
+        self._refresh_history_buttons()
+        self.update()
+
+    _MIME = "application/x-crit-overlay-annotation"
+
+    def copy_selection(self):
+        if self.selection is None:
+            return
+        self._annotation_clipboard = self.selection.copy()
+        self._paste_count = 0
+        mime = QMimeData()
+        mime.setData(self._MIME, b"1")
+        if self.selection.shape == "text":
+            mime.setText(self.selection.text)
+        QApplication.clipboard().setMimeData(mime)
+
+    def cut_selection(self):
+        if self.selection is not None:
+            self.copy_selection()
+            self.delete_selection()
+
+    def paste(self):
+        """Annotations copied here paste as annotations; any other text on
+        the Windows clipboard becomes a new text annotation at the cursor."""
+        if self._text_edit is not None:
+            return
+        mime = QApplication.clipboard().mimeData()
+        if mime is not None and mime.hasFormat(self._MIME) and self._annotation_clipboard is not None:
+            self._add_annotation(self._offset_copy(self._annotation_clipboard))
+            return
+        text = QApplication.clipboard().text().replace("\r\n", "\n").replace("\r", "\n")
+        text = "".join(ch for ch in text if ch == "\n" or ch.isprintable()).strip("\n")
+        if not text.strip():
+            return
+        pos = self.cursor_pos or self._to_doc(QPointF(self.width() / 2, self.height() / 2))
+        stroke = Stroke(self.color, self.text_size / self._view_scale(), self.opacity, shape="text")
+        stroke.font = TextStyle(self.text_family, self.text_bold, self.text_align)
+        stroke.points = [(QPointF(pos), brush.SHAPE_PRESSURE)]
+        stroke.text = text
+        self._add_annotation(stroke)
+
+    def duplicate_selection(self):
+        if self.selection is not None:
+            self._paste_count = 0
+            self._add_annotation(self._offset_copy(self.selection))
+
+    def delete_selection(self):
+        if self.selection is None or self._drag is not None:
+            return
+        self.history.change([self.selection], [])
+        self.selection = None
+        self._rebuild_canvas()
+        self._refresh_history_buttons()
+        self._sync_text_bar()
+        self.update()
+
+    def _nudge(self, key, big):
+        step = (10 if big else 1) / self._view_scale()
+        dx, dy = {Qt.Key.Key_Left: (-step, 0), Qt.Key.Key_Right: (step, 0),
+                  Qt.Key.Key_Up: (0, -step), Qt.Key.Key_Down: (0, step)}[key]
+        self._replace_selection(sel_mod.translated(self.selection, dx, dy), merge_key="nudge")
 
     def _install_shortcuts(self):
         def add(seq, fn):
@@ -926,6 +1220,12 @@ class Overlay(QWidget):
         add("I", self._toggle_eyedropper)
         add("U", self._cycle_shape)
         add("T", lambda: self._set_mode("text"))
+        add("V", lambda: self._set_mode("select"))
+        add("Ctrl+C", self.copy_selection)
+        add("Ctrl+X", self.cut_selection)
+        add("Ctrl+V", self.paste)
+        add("Ctrl+D", self.duplicate_selection)
+        add("Delete", self.delete_selection)
         add("Ctrl+Z", self.undo)
         add("Ctrl+Shift+Z", self.redo)
         add("F7", self.move_to_next_screen)
@@ -983,10 +1283,15 @@ class Overlay(QWidget):
     def _set_mode(self, mode):
         if mode != "text":
             self._commit_text()
+        if mode != "select":
+            self._set_selection(None)
         self.mode = mode
         self.text_btn.setChecked(mode == "text")
+        self.select_btn.setChecked(mode == "select")
         if mode == "text":
             self.setCursor(Qt.CursorShape.IBeamCursor)
+        elif mode == "select":
+            self.setCursor(Qt.CursorShape.ArrowCursor)
         elif not self._wants_pan() and not self._selecting:
             self.unsetCursor()
         self._sync_text_bar()
@@ -1055,6 +1360,9 @@ class Overlay(QWidget):
         self.size_slider.setValue(value)
         self.size_slider.blockSignals(False)
         self.size_value_label.setText(f"{value}px")
+        if self.selection is not None and self.selection.shape != "text":
+            size = value / self._view_scale()
+            self._modify_selection(lambda s: setattr(s, "size", size), merge_key="size")
         self._save_settings()
 
     def _on_size_slider_changed(self, v):
@@ -1070,6 +1378,13 @@ class Overlay(QWidget):
         self.opacity_slider.setValue(percent)
         self.opacity_slider.blockSignals(False)
         self.opacity_value_label.setText(f"{percent}%")
+        if self._text_edit is not None:
+            self._text_edit.opacity = self.opacity
+            self.setFocus()
+            self.update()
+        elif self.selection is not None:
+            opacity = self.opacity
+            self._modify_selection(lambda s: setattr(s, "opacity", opacity), merge_key="opacity")
         self._save_settings()
 
     def _on_opacity_slider_changed(self, v):
@@ -1093,6 +1408,9 @@ class Overlay(QWidget):
         if self._text_edit is not None:
             self._text_edit.color = QColor(self.color)
             self.setFocus()
+        elif self.selection is not None:
+            color = QColor(self.color)
+            self._modify_selection(lambda s: setattr(s, "color", QColor(color)), merge_key="color")
         self._save_settings()
         self.update()
 
@@ -1382,6 +1700,11 @@ class Overlay(QWidget):
         if self._text_edit is not None:
             self._text_key(event)
             return
+        if (self.selection is not None and self._drag is None and event.key() in
+                (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down)):
+            self._nudge(event.key(), bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier))
+            event.accept()
+            return
         if event.key() == Qt.Key.Key_Shift and self.current is not None and self.current.shape is not None:
             self._update_shape_end()
         if event.key() == Qt.Key.Key_Space:
@@ -1417,6 +1740,9 @@ class Overlay(QWidget):
         # selecting a new area. Otherwise (selecting, or drawing on the
         # full monitor) it hides the overlay.
         if self._grabbing:
+            return
+        if self.selection is not None:
+            self._set_selection(None)
             return
         if self.capture is not None:
             self.end_capture()
@@ -1655,7 +1981,10 @@ class Overlay(QWidget):
         self.update()
 
     def _refresh_history_buttons(self):
-        self.undo_btn.setEnabled(len(self.history) > 0)
+        if self.selection is not None and not self.history.contains(self.selection):
+            self.selection = None
+            self._sync_text_bar()
+        self.undo_btn.setEnabled(len(self.history.undo_stack) > 0)
         self.redo_btn.setEnabled(len(self.history.redo_stack) > 0)
 
     # -- stroke lifecycle --------------------------------------------------
@@ -1982,7 +2311,8 @@ class Overlay(QWidget):
                 return
             if is_eraser_tip:
                 self._commit_text()
-            elif self._text_press(pos):
+            elif self._annotation_press(pos, event.modifiers()):
+                self._tablet_contact = True
                 event.accept()
                 return
             self._tablet_contact = True
@@ -1990,8 +2320,11 @@ class Overlay(QWidget):
         elif event_type == QEvent.Type.TabletMove:
             if self._tablet_contact and self.current is not None:
                 self._add_point(pos, pressure)
+            elif self._tablet_contact and (self._drag is not None or self._text_dragging):
+                self._annotation_move(pos)
         elif event_type == QEvent.Type.TabletRelease:
             self._tablet_contact = False
+            self._annotation_release()
             self._end_stroke()
 
         event.accept()
@@ -2025,7 +2358,7 @@ class Overlay(QWidget):
                     self._pick_color_and_restore_mode(event.globalPosition())
                     event.accept()
                     return
-                if self._text_press(self._to_doc(pos)):
+                if self._annotation_press(self._to_doc(pos), event.modifiers()):
                     event.accept()
                     return
                 self._begin_stroke(self._to_doc(pos), 0.65)
@@ -2048,6 +2381,8 @@ class Overlay(QWidget):
                     self._selection_input("move", pos)
             elif self._panning is not None:
                 self._pan_input("move", pos)
+            elif self._drag is not None or self._text_dragging:
+                self._annotation_move(self._to_doc(pos))
             elif event.buttons() & Qt.MouseButton.LeftButton and not self._point_over_ui(pos):
                 self._add_point(self._to_doc(pos), 0.65)
             else:
@@ -2072,6 +2407,7 @@ class Overlay(QWidget):
                 elif self._panning is not None:
                     self._pan_input("release", self._overlay_pos(event))
                 else:
+                    self._annotation_release()
                     self._end_stroke()
                 event.accept()
         except Exception:
@@ -2265,7 +2601,8 @@ class Overlay(QWidget):
         try:
             painter.translate(-self._canvas_origin)
             for stroke in self.history:
-                self._draw_stroke(painter, stroke)
+                if stroke is not getattr(self, "_hidden_stroke", None):
+                    self._draw_stroke(painter, stroke)
         finally:
             painter.end()
 
@@ -2351,11 +2688,16 @@ class Overlay(QWidget):
                     painter.drawPixmap(self._live_layer_origin, self._live_layer)
                     painter.restore()
 
+            if self._floating is not None:
+                self._paint_floating(painter, self._floating)
             if self._text_edit is not None and not self._capturing:
                 self._paint_live_text(painter)
 
             if clipped:
                 painter.restore()
+            if (self.selection is not None and self._text_edit is None and not self._capturing
+                    and not self.pass_through):
+                self._paint_selection(painter)
             if self.region is not None and not self._capturing and not self.pass_through:
                 self._paint_region_frame(painter, self.region)
             if self._selecting and self._selection_anchor is not None and not self._capturing:
@@ -2365,7 +2707,7 @@ class Overlay(QWidget):
             # Not while capturing: a real mouse move during the capture delay
             # sets cursor_pos again and would put the ring in the screenshot.
             if (not self.pass_through and self.cursor_pos and not self._selecting and not self._capturing
-                    and not self._wants_pan() and self.mode != "text"):
+                    and not self._wants_pan() and self.mode not in ("text", "select")):
                 painter.save()
                 # Ring and guide in window coordinates, at on-screen size.
                 cursor_view = self._to_view(self.cursor_pos)

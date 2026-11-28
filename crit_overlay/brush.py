@@ -323,6 +323,13 @@ def _line_x(rect, width, align):
     return rect.left()
 
 
+def text_layout(stroke):
+    """(font metrics, lines, line widths, block rect) for caret and hit
+    testing, from the same layout paint_text() draws."""
+    _font, fm, lines, widths = _text_lines(stroke)
+    return fm, lines, widths, text_rect(stroke)
+
+
 def paint_text(painter, stroke, color):
     font, fm, lines, widths = _text_lines(stroke)
     rect = text_rect(stroke)
@@ -340,3 +347,6 @@ def text_caret(stroke):
     x = _line_x(rect, widths[-1], stroke.font.align) + widths[-1]
     top = rect.top() + i * fm.lineSpacing()
     return QPointF(x, top), QPointF(x, top + fm.lineSpacing())
+
+
+line_x = _line_x

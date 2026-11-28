@@ -316,7 +316,24 @@ def align_right_glyph(painter, color, size):
     _align_glyph(painter, color, size, "right")
 
 
+def select_glyph(painter, color, size):
+    # An outlined pointer: the Select/Move tool.
+    painter.setPen(_stroke_pen(color, size * 0.08))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    pointer = QPainterPath()
+    pointer.moveTo(size * 0.30, size * 0.16)
+    pointer.lineTo(size * 0.30, size * 0.78)
+    pointer.lineTo(size * 0.45, size * 0.64)
+    pointer.lineTo(size * 0.56, size * 0.86)
+    pointer.lineTo(size * 0.65, size * 0.82)
+    pointer.lineTo(size * 0.55, size * 0.60)
+    pointer.lineTo(size * 0.74, size * 0.58)
+    pointer.closeSubpath()
+    painter.drawPath(pointer)
+
+
 _GLYPHS = {
+    "select": select_glyph,
     "text": text_glyph,
     "bold": bold_glyph,
     "align_left": align_left_glyph,
