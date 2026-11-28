@@ -1,6 +1,7 @@
 """Select/Move tool and in-place text editing (exp/shape-tools prototype)."""
 
 import unittest
+from unittest import mock
 
 from tests import qt_env  # noqa: F401  must come before other PySide6 imports
 
@@ -8,6 +9,7 @@ from PySide6.QtCore import QEvent, QPointF, QRect, Qt  # noqa: E402
 from PySide6.QtGui import QColor, QKeyEvent  # noqa: E402
 
 from crit_overlay import brush  # noqa: E402
+from crit_overlay import overlay as overlay_mod  # noqa: E402
 from crit_overlay import selection as sel_mod  # noqa: E402
 from crit_overlay.models import History, Stroke  # noqa: E402
 from tests.test_capture import CaptureCase  # noqa: E402
@@ -302,6 +304,154 @@ class SelectTests(SelectCase):
         self.mouse("release", 1000, 600)
         self.key("release", Qt.Key.Key_Space)
         self.assertAlmostEqual(o.capture.to_view(doc).x() - before.x(), 40, delta=1)
+
+
+class RefineTests(SelectCase):
+    """Stacking order, erasures that travel, and Shift constraints."""
+
+    def test_history_replace_keeps_position_and_merges(self):
+        h = History(10)
+        a, b, c = (Stroke(QColor("red"), 1, 1) for _ in range(3))
+        for s in (a, b, c):
+            h.commit(s)
+        a2 = a.copy()
+        h.replace(a, a2)
+        self.assertEqual([id(s) for s in h.strokes], [id(a2), id(b), id(c)])
+        a3 = a2.copy()
+        h.replace(a2, a3, merge_key="k")
+        a4 = a3.copy()
+        h.replace(a3, a4, merge_key="k")
+        self.assertIs(h.strokes[0], a4)
+        self.assertEqual(len(h.undo_stack), 5)
+        h.undo()
+        self.assertIs(h.strokes[0], a2)
+        h.undo()
+        self.assertEqual([id(s) for s in h.strokes], [id(a), id(b), id(c)])
+        h.redo()
+        self.assertIs(h.strokes[0], a2)
+
+    def test_manipulation_keeps_stacking_order(self):
+        o = self.o
+        first = self.make_rect()
+        o._set_mode("ellipse")
+        self.drag((250, 250), (450, 350))
+        o._set_mode("select")
+        self.assertEqual(o.history.strokes.index(first), 0)
+        self.drag((300, 200), (300, 220))            # move
+        self.assertIs(o.history.strokes[0], o.selection)
+        o._set_color(QColor(0, 0, 255))              # recolor
+        self.assertIs(o.history.strokes[0], o.selection)
+        self.drag((400, 320), (420, 340))            # resize bottom-right
+        self.assertIs(o.history.strokes[0], o.selection)
+        self.keypress(Qt.Key.Key_Left)               # nudge
+        self.assertIs(o.history.strokes[0], o.selection)
+        text = self.make_text("abc", at=(600, 600))
+        self.make_rect()
+        r = brush.text_rect(text)
+        self.click(r.center().x(), r.center().y())
+        self.click(r.center().x(), r.center().y())   # double-click: edit
+        self.keypress(Qt.Key.Key_End)
+        self.type("d")
+        self.keypress(Qt.Key.Key_Return, CTRL)
+        edited = [s for s in o.history.strokes if s.shape == "text"][0]
+        self.assertEqual(edited.text, "abcd")
+        self.assertEqual(o.history.strokes.index(edited), len(o.history.strokes) - 2)
+
+    def erase_across_top_edge(self, x=300):
+        o = self.o
+        o._set_mode("eraser")
+        o._set_size(20)
+        o._set_smoothing(0)
+        self.draw_line((x, 170), (x, 230))
+
+    def test_erased_gap_moves_with_shape(self):
+        o = self.o
+        self.make_rect()
+        self.erase_across_top_edge(300)
+        self.assertNotEqual(self.painted(300, 200)[:3], (255, 0, 0))
+        o._set_mode("select")
+        self.click(250, 200)
+        self.drag((250, 200), (310, 200))  # right by 60
+        # The gap travelled with the shape...
+        self.assertNotEqual(self.painted(360, 200)[:3], (255, 0, 0), "gap moved")
+        # ...and the old eraser no longer cuts the shape where it now lies.
+        self.assertEqual(self.painted(300, 200)[:3], (255, 0, 0), "not erased twice")
+        self.assertEqual(self.painted(420, 200)[:3], (255, 0, 0))
+        o.undo()
+        self.assertNotEqual(self.painted(300, 200)[:3], (255, 0, 0), "undo restores the gap")
+        self.assertEqual(self.painted(360, 200)[:3], (255, 0, 0))
+
+    def test_erased_gap_survives_resize_duplicate_and_export(self):
+        o = self.o
+        self.capture(QRect(50, 60, 600, 500))
+        o._set_mode("rect")
+        a = o.capture.to_view(QPointF(100, 100))
+        b = o.capture.to_view(QPointF(300, 200))
+        self.drag((a.x(), a.y()), (b.x(), b.y()))
+        gap = o.capture.to_view(QPointF(200, 100))
+        o._set_mode("eraser")
+        o._set_size(20)
+        o._set_smoothing(0)
+        self.draw_line((gap.x(), gap.y() - 20), (gap.x(), gap.y() + 20))
+        o._set_mode("select")
+        self.click(a.x() + 20, a.y())
+        self.drag((b.x(), b.y()), (b.x() + (b.x() - a.x()), b.y()))  # double the width
+        self.assertEqual(len(o.selection.erasures), 1)
+        img = o.capture_export().toImage()
+
+        def red(doc_x, doc_y):
+            c = img.pixelColor(round(doc_x * o.capture.dpr), round(doc_y * o.capture.dpr))
+            return c.red() > 200 and c.green() < 60
+
+        self.assertFalse(red(300, 100), "gap scaled with the shape, in the export")
+        self.assertTrue(red(200, 100), "old eraser spot is shape again")
+        o.duplicate_selection()
+        dup = o.selection
+        self.assertEqual(len(dup.erasures), 1)
+        off = dup.points[0][0].x() - 100
+        img = o.capture_export().toImage()
+        self.assertFalse(red(300 + off, 100 + off), "duplicate keeps the gap")
+        self.assertTrue(red(250 + off, 100 + off))
+
+    def test_shift_resize_keeps_proportions(self):
+        o = self.o
+        rect = self.make_rect()  # 200x100
+        r = sel_mod.resized(rect, "br", QPointF(600, 320), constrain=True)
+        b = QRectF_of(r)
+        self.assertAlmostEqual(b.width() / b.height(), 2.0, places=3)
+        self.assertAlmostEqual(b.width(), 400, places=3)
+        r = sel_mod.resized(rect, "tl", QPointF(190, 100), constrain=True)
+        b = QRectF_of(r)
+        self.assertAlmostEqual(b.width() / b.height(), 2.0, places=3)
+        self.assertAlmostEqual(b.right(), 400, places=3)
+        self.assertAlmostEqual(b.bottom(), 300, places=3)
+        r = sel_mod.resized(rect, "r", QPointF(600, 250), constrain=True)
+        b = QRectF_of(r)
+        self.assertAlmostEqual(b.height(), 200, places=3)
+        self.assertAlmostEqual(b.center().y(), 250, places=3)
+        # Through the overlay, with Shift held.
+        self.click(300, 200)
+        with mock.patch.object(overlay_mod.QApplication, "keyboardModifiers", return_value=SHIFT):
+            self.drag((400, 300), (600, 320))
+        b = QRectF_of(o.selection)
+        self.assertAlmostEqual(b.width() / b.height(), 2.0, delta=0.02)
+
+    def test_shift_endpoint_snaps_to_45_degrees(self):
+        o = self.o
+        o._set_mode("line")
+        self.drag((200, 500), (400, 500))
+        o._set_mode("select")
+        self.click(300, 500)
+        with mock.patch.object(overlay_mod.QApplication, "keyboardModifiers", return_value=SHIFT):
+            self.drag((400, 500), (390, 690))
+        p0, p1 = o.selection.points[0][0], o.selection.points[-1][0]
+        self.assertEqual((p0.x(), p0.y()), (200, 500), "other end stays put")
+        self.assertAlmostEqual(p1.x() - p0.x(), p1.y() - p0.y(), delta=0.5)
+
+
+def QRectF_of(stroke):
+    from PySide6.QtCore import QRectF
+    return QRectF(stroke.points[0][0], stroke.points[-1][0]).normalized()
 
 
 if __name__ == "__main__":

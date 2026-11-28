@@ -875,7 +875,10 @@ class Overlay(QWidget):
         te, original = self._end_text_edit()
         keep = bool(te.text.strip())
         if original is not None:
-            self.history.change([original], [te] if keep else [])
+            if keep:
+                self.history.replace(original, te)
+            else:
+                self.history.change([original], [])
             self._rebuild_canvas()
             self.selection = te if keep and self.mode == "select" else None
         elif keep:
@@ -1072,7 +1075,7 @@ class Overlay(QWidget):
         self._replace_selection(new, merge_key)
 
     def _replace_selection(self, new, merge_key=None):
-        self.history.change([self.selection], [new], merge_key)
+        self.history.replace(self.selection, new, merge_key)
         self.selection = new
         self._rebuild_canvas()
         self._refresh_history_buttons()
@@ -1096,7 +1099,7 @@ class Overlay(QWidget):
         double = hit is last_hit and now - last_time < QApplication.doubleClickInterval() / 1000.0
         if double and hit.shape == "text":
             self._last_select_press = (0.0, None)
-            self._begin_text(hit.copy(), original=hit, caret_at=pos)
+            self._begin_text(sel_mod.absorb(self.history, hit), original=hit, caret_at=pos)
             return
         self._drag = {"kind": "move", "handle": None, "start": QPointF(pos), "orig": hit, "moved": False}
 
@@ -1108,17 +1111,20 @@ class Overlay(QWidget):
         drag = self._drag
         if drag is None:
             return
+        drag["pos"] = QPointF(pos)
         dx, dy = pos.x() - drag["start"].x(), pos.y() - drag["start"].y()
         if not drag["moved"]:
             if max(abs(dx), abs(dy)) * self._view_scale() < 3:
                 return
             drag["moved"] = True
+            drag["src"] = sel_mod.absorb(self.history, drag["orig"])
             self._hidden_stroke = drag["orig"]
             self._rebuild_canvas()
         if drag["kind"] == "move":
-            self._floating = sel_mod.translated(drag["orig"], dx, dy)
+            self._floating = sel_mod.translated(drag["src"], dx, dy)
         else:
-            self._floating = sel_mod.resized(drag["orig"], drag["handle"], pos)
+            shift = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+            self._floating = sel_mod.resized(drag["src"], drag["handle"], pos, constrain=shift)
         self.update()
 
     def _annotation_release(self):
@@ -1153,7 +1159,7 @@ class Overlay(QWidget):
     def copy_selection(self):
         if self.selection is None:
             return
-        self._annotation_clipboard = self.selection.copy()
+        self._annotation_clipboard = sel_mod.absorb(self.history, self.selection)
         self._paste_count = 0
         mime = QMimeData()
         mime.setData(self._MIME, b"1")
@@ -1189,7 +1195,7 @@ class Overlay(QWidget):
     def duplicate_selection(self):
         if self.selection is not None:
             self._paste_count = 0
-            self._add_annotation(self._offset_copy(self.selection))
+            self._add_annotation(self._offset_copy(sel_mod.absorb(self.history, self.selection)))
 
     def delete_selection(self):
         if self.selection is None or self._drag is not None:
@@ -1205,7 +1211,8 @@ class Overlay(QWidget):
         step = (10 if big else 1) / self._view_scale()
         dx, dy = {Qt.Key.Key_Left: (-step, 0), Qt.Key.Key_Right: (step, 0),
                   Qt.Key.Key_Up: (0, -step), Qt.Key.Key_Down: (0, step)}[key]
-        self._replace_selection(sel_mod.translated(self.selection, dx, dy), merge_key="nudge")
+        moved = sel_mod.translated(sel_mod.absorb(self.history, self.selection), dx, dy)
+        self._replace_selection(moved, merge_key="nudge")
 
     def _install_shortcuts(self):
         def add(seq, fn):
@@ -1705,8 +1712,8 @@ class Overlay(QWidget):
             self._nudge(event.key(), bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier))
             event.accept()
             return
-        if event.key() == Qt.Key.Key_Shift and self.current is not None and self.current.shape is not None:
-            self._update_shape_end()
+        if event.key() == Qt.Key.Key_Shift:
+            self._shift_changed()
         if event.key() == Qt.Key.Key_Space:
             if not event.isAutoRepeat() and self.capture is not None and not self._selecting:
                 self._space_held = True
@@ -1716,9 +1723,18 @@ class Overlay(QWidget):
             return
         super().keyPressEvent(event)
 
-    def keyReleaseEvent(self, event):
-        if event.key() == Qt.Key.Key_Shift and self.current is not None and self.current.shape is not None:
+    def _shift_changed(self):
+        """Shift went down or up: re-apply or drop the constraint on a shape
+        being drawn or a handle being dragged, without waiting for a move."""
+        if self.current is not None and self.current.shape is not None:
             self._update_shape_end()
+        drag = self._drag
+        if drag is not None and drag["kind"] == "resize" and drag["moved"] and "pos" in drag:
+            self._annotation_move(drag["pos"])
+
+    def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key.Key_Shift:
+            self._shift_changed()
         if event.key() == Qt.Key.Key_Space:
             if not event.isAutoRepeat():
                 self._space_held = False
@@ -2600,11 +2616,58 @@ class Overlay(QWidget):
         painter = QPainter(self._canvas)
         try:
             painter.translate(-self._canvas_origin)
+            hidden = getattr(self, "_hidden_stroke", None)
+            absorbers = {}
             for stroke in self.history:
-                if stroke is not getattr(self, "_hidden_stroke", None):
-                    self._draw_stroke(painter, stroke)
+                for eraser, _t in stroke.erasures:
+                    absorbers.setdefault(id(eraser), []).append(stroke)
+            drawn = set()
+            for stroke in self.history:
+                if stroke is hidden:
+                    continue
+                self._draw_stroke(painter, stroke)
+                drawn.add(id(stroke))
+                if stroke.eraser and id(stroke) in absorbers:
+                    below = [a for a in absorbers[id(stroke)] if id(a) in drawn]
+                    if below:
+                        self._restore_under_eraser(painter, stroke, below)
         finally:
             painter.end()
+
+    def _restore_under_eraser(self, painter, eraser, annotations):
+        """Inside `eraser`, put back the annotations below it that carry it
+        in their own erasures (selection.absorb). They draw their erased
+        parts where they are now, so this eraser must not also clear them
+        where it was drawn. Exact under antialiasing: Clear left
+        dst * (1 - coverage), and this adds annotation * coverage."""
+        segments = brush.stroke_segments(eraser)
+        if not segments:
+            return
+        bounds = brush.segment_bounds(segments)
+        dpr = self._canvas_dpr()
+        mask = brush.new_layer(bounds.size(), dpr)
+        p = QPainter(mask)
+        try:
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            p.translate(-QPointF(bounds.topLeft()))
+            brush.paint_segments(p, segments, QColor(0, 0, 0, 255))
+        finally:
+            p.end()
+        layer = brush.new_layer(bounds.size(), dpr)
+        p = QPainter(layer)
+        try:
+            p.translate(-QPointF(bounds.topLeft()))
+            for stroke in annotations:
+                self._draw_stroke(p, stroke)
+            p.resetTransform()
+            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+            p.drawPixmap(0, 0, mask)
+        finally:
+            p.end()
+        painter.save()
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
+        painter.drawPixmap(bounds.topLeft(), layer)
+        painter.restore()
 
     def _target_dpr(self):
         """Pixel density for the canvas: the monitor's scale factor, unless

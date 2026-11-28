@@ -3,11 +3,11 @@
 from collections import deque
 
 from PySide6.QtCore import QPointF
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QTransform
 
 
 class Stroke:
-    __slots__ = ("color", "size", "opacity", "eraser", "points", "shape", "text", "font")
+    __slots__ = ("color", "size", "opacity", "eraser", "points", "shape", "text", "font", "erasures")
 
     def __init__(self, color, size, opacity, eraser=False, shape=None):
         self.color = QColor(color)
@@ -22,6 +22,11 @@ class Stroke:
         # the font's pixel size; font is a TextStyle.
         self.text = ""
         self.font = None
+        # Annotations only: eraser strokes that erased this annotation, each
+        # with the transform from where it was drawn to where the annotation
+        # is now. They keep erased parts with the annotation when it is moved
+        # or resized (see selection.absorb and brush.render_shape_layer).
+        self.erasures = ()
 
     def copy(self):
         dup = Stroke(self.color, self.size, self.opacity, self.eraser, self.shape)
@@ -29,6 +34,7 @@ class Stroke:
         dup.text = self.text
         if self.font is not None:
             dup.font = TextStyle(self.font.family, self.font.bold, self.font.align)
+        dup.erasures = tuple((e, QTransform(t)) for e, t in self.erasures)
         return dup
 
 
@@ -71,7 +77,11 @@ class History:
     def _apply(self, change):
         for i, _stroke in sorted(change.removed, key=lambda e: e[0], reverse=True):
             del self.strokes[i]
-        self.strokes.extend(change.added)
+        if change.positions is None:
+            self.strokes.extend(change.added)
+        else:
+            for i, stroke in sorted(zip(change.positions, change.added), key=lambda e: e[0]):
+                self.strokes.insert(i, stroke)
 
     def _revert(self, change):
         for stroke in change.added:
@@ -98,6 +108,21 @@ class History:
             last.added = list(added)
         else:
             entry = _Change([(self._index(s), s) for s in removed], list(added), merge_key)
+            self._apply(entry)
+            self.undo_stack.append(entry)
+        self.redo_stack.clear()
+
+    def replace(self, old, new, merge_key=None):
+        """Swap committed `old` for `new` in the same stacking position, as
+        one undo step (merged like change())."""
+        i = self._index(old)
+        last = self.undo_stack[-1] if self.undo_stack else None
+        if (merge_key is not None and last is not None and last.merge_key == merge_key
+                and len(last.added) == 1 and last.added[0] is old):
+            self.strokes[i] = new
+            last.added = [new]
+        else:
+            entry = _Change([(i, old)], [new], merge_key, positions=[i])
             self._apply(entry)
             self.undo_stack.append(entry)
         self.redo_stack.clear()
@@ -132,9 +157,12 @@ class History:
 
 
 class _Change:
-    __slots__ = ("removed", "added", "merge_key")
+    __slots__ = ("removed", "added", "merge_key", "positions")
 
-    def __init__(self, removed, added, merge_key=None):
+    def __init__(self, removed, added, merge_key=None, positions=None):
         self.removed = removed  # [(index before the change, stroke)]
         self.added = added
         self.merge_key = merge_key
+        # Where each added stroke goes (indices after the removal), or None
+        # to append on top.
+        self.positions = positions

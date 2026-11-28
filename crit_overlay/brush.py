@@ -155,7 +155,7 @@ def logical_rect(origin, pixmap):
     return QRect(origin, QSize(math.ceil(pixmap.width() / dpr), math.ceil(pixmap.height() / dpr)))
 
 
-def _segment_bounds(segments, margin=3.0):
+def segment_bounds(segments, margin=3.0):
     xs = [p.x() for p, _ in segments]
     ys = [p.y() for p, _ in segments]
     pad = max((w for _, w in segments), default=0.0) / 2 + margin
@@ -170,7 +170,7 @@ def render_stroke_layer(stroke, segments, dpr=1.0):
     compositing. See the module docstring."""
     if not segments:
         return None
-    bounds = _segment_bounds(segments)
+    bounds = segment_bounds(segments)
     if bounds.width() <= 0 or bounds.height() <= 0:
         return None
 
@@ -276,6 +276,13 @@ def render_shape_layer(stroke, dpr=1.0):
                                 Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawPath(shape_path(stroke))
+        if stroke.erasures:
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+            for eraser, transform in stroke.erasures:
+                painter.save()
+                painter.setTransform(transform, True)
+                paint_segments(painter, stroke_segments(eraser), QColor(0, 0, 0, 255))
+                painter.restore()
     finally:
         painter.end()
     return layer, bounds.topLeft()

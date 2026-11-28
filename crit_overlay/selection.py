@@ -5,7 +5,10 @@ strokes aren't selectable. Everything is in stroke coordinates and returns
 new Strokes; committed strokes are never changed in place (see History).
 """
 
+import math
+
 from PySide6.QtCore import QPointF, QRectF
+from PySide6.QtGui import QTransform
 from PySide6.QtGui import QPainterPathStroker
 
 from . import brush
@@ -59,22 +62,75 @@ def handle_at(stroke, pos, tolerance):
     return best
 
 
+def absorb(strokes, stroke):
+    """A copy of committed `stroke` that also carries the eraser strokes
+    drawn over it later, so its erased parts travel with it when it is moved,
+    resized or duplicated. The erasers stay in the history as they were; the
+    canvas rebuild re-reveals an absorbing annotation inside them (see
+    Overlay._restore_under_eraser), so nothing is erased twice."""
+    strokes = list(strokes)
+    dup = stroke.copy()
+    idx = next((i for i, s in enumerate(strokes) if s is stroke), None)
+    if idx is None:
+        return dup
+    have = {id(e) for e, _t in dup.erasures}
+    pad = brush.shape_width(stroke.size) / 2 + 2
+    area = bounds(stroke).adjusted(-pad, -pad, pad, pad)
+    added = []
+    for e in strokes[idx + 1:]:
+        if not e.eraser or id(e) in have:
+            continue
+        segments = brush.stroke_segments(e)
+        if segments and QRectF(brush.segment_bounds(segments)).intersects(area):
+            added.append((e, QTransform()))
+    dup.erasures = dup.erasures + tuple(added)
+    return dup
+
+
+def _transform_erasures(dup, m):
+    if dup.erasures:
+        dup.erasures = tuple((e, t * m) for e, t in dup.erasures)
+    return dup
+
+
 def translated(stroke, dx, dy):
     dup = stroke.copy()
     dup.points = [(QPointF(p.x() + dx, p.y() + dy), pr) for p, pr in dup.points]
-    return dup
+    return _transform_erasures(dup, QTransform.fromTranslate(dx, dy))
 
 
 MIN_TEXT_SIZE = 2.0
 
 
-def resized(orig, handle, pos):
-    """A copy of orig with `handle` dragged to pos."""
+def _similarity(a0, a1, b0, b1):
+    """The rotation + uniform scale + translation taking a0->b0, a1->b1."""
+    ax, ay = a1.x() - a0.x(), a1.y() - a0.y()
+    bx, by = b1.x() - b0.x(), b1.y() - b0.y()
+    d = ax * ax + ay * ay
+    if d < 1e-12:
+        return QTransform.fromTranslate(b0.x() - a0.x(), b0.y() - a0.y())
+    # Complex division (b / a).
+    re, im = (bx * ax + by * ay) / d, (by * ax - bx * ay) / d
+    dx = b0.x() - (re * a0.x() - im * a0.y())
+    dy = b0.y() - (im * a0.x() + re * a0.y())
+    return QTransform(re, im, -im, re, dx, dy)
+
+
+def resized(orig, handle, pos, constrain=False):
+    """A copy of orig with `handle` dragged to pos. With constrain (Shift),
+    rectangles and ellipses keep their proportions and line or arrow ends
+    snap to 45-degree steps. Text always scales proportionally."""
     dup = orig.copy()
     if orig.shape in ("line", "arrow"):
-        i = 0 if handle == "p0" else len(dup.points) - 1
+        last = len(dup.points) - 1
+        i, fixed = (0, last) if handle == "p0" else (last, 0)
+        anchor = dup.points[fixed][0]
+        if constrain:
+            pos = brush.constrain_end("line", anchor, pos)
         dup.points[i] = (QPointF(pos), dup.points[i][1])
-        return dup
+        a = (orig.points[0][0], orig.points[-1][0])
+        b = (dup.points[0][0], dup.points[-1][0])
+        return _transform_erasures(dup, _similarity(a[0], a[1], b[0], b[1]))
     if orig.shape == "text":
         r = brush.text_rect(orig)
         fixed = QPointF(r.right() if "l" in handle else r.left(), r.bottom() if "t" in handle else r.top())
@@ -85,7 +141,9 @@ def resized(orig, handle, pos):
         top = fixed.y() - nr.height() if "t" in handle else fixed.y()
         x = {"left": left, "center": left + nr.width() / 2, "right": left + nr.width()}[dup.font.align]
         dup.points = [(QPointF(x, top), dup.points[0][1])]
-        return dup
+        s = dup.size / max(orig.size, 1e-6)
+        m = QTransform(s, 0, 0, s, left - r.left() * s, top - r.top() * s)
+        return _transform_erasures(dup, m)
     r = QRectF(orig.points[0][0], orig.points[-1][0]).normalized()
     left, top, right, bottom = r.left(), r.top(), r.right(), r.bottom()
     if "l" in handle:
@@ -96,5 +154,29 @@ def resized(orig, handle, pos):
         top = pos.y()
     if "b" in handle:
         bottom = pos.y()
+    w, h = r.width(), r.height()
+    if constrain and w > 1e-6 and h > 1e-6:
+        horiz, vert = ("l" in handle or "r" in handle), ("t" in handle or "b" in handle)
+        if horiz and vert:
+            fx = r.right() if "l" in handle else r.left()
+            fy = r.bottom() if "t" in handle else r.top()
+            mx = left if "l" in handle else right
+            my = top if "t" in handle else bottom
+            s = max(abs(mx - fx) / w, abs(my - fy) / h)
+            mx = fx + math.copysign(s * w, (mx - fx) or (-1 if "l" in handle else 1))
+            my = fy + math.copysign(s * h, (my - fy) or (-1 if "t" in handle else 1))
+            left, right = (mx, fx) if "l" in handle else (fx, mx)
+            top, bottom = (my, fy) if "t" in handle else (fy, my)
+        elif horiz:
+            nh = h * abs(right - left) / w
+            cy = r.center().y()
+            top, bottom = cy - nh / 2, cy + nh / 2
+        else:
+            nw = w * abs(bottom - top) / h
+            cx = r.center().x()
+            left, right = cx - nw / 2, cx + nw / 2
     dup.points = [(QPointF(left, top), dup.points[0][1]), (QPointF(right, bottom), dup.points[-1][1])]
-    return dup
+    sx = (right - left) / w if w > 1e-6 else 1.0
+    sy = (bottom - top) / h if h > 1e-6 else 1.0
+    m = QTransform(sx, 0, 0, sy, left - r.left() * sx, top - r.top() * sy)
+    return _transform_erasures(dup, m)
