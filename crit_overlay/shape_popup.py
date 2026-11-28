@@ -1,11 +1,11 @@
 """A one-row popup for picking the shape tool, opened from the toolbar's
 shape button. Same pattern as ColorPopup."""
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QSize
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QToolButton
 
 from . import constants as C
-from .ui_widgets import place_popup
+from .ui_widgets import make_panel, place_popup
 from . import icons
 
 SHAPE_LABELS = {
@@ -18,7 +18,8 @@ SHAPE_LABELS = {
 
 class ShapePopup(QFrame):
     def __init__(self, overlay):
-        super().__init__(None, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        super().__init__(None)
+        make_panel(self)
         self._overlay = overlay
         self.setObjectName("Toolbar")
         self.setStyleSheet(C.TOOLBAR_STYLE)

@@ -55,7 +55,8 @@ from .pass_through_badge import PassThroughBadge
 from .region_popup import RegionPopup
 from .shape_popup import SHAPE_LABELS, ShapePopup
 from .text_edit import TextEditor
-from .ui_widgets import MenuRow, ToolbarGrip, percent_field, place_popup, px_field, size_field
+from .ui_widgets import (MenuRow, ToolbarGrip, close_panels, make_panel, percent_field, place_popup, px_field,
+                         size_field)
 from .color_popup import swatch_icon
 from . import brush_preview
 
@@ -195,6 +196,11 @@ class Overlay(QWidget):
         self._stroke_log_start = 0
         self._stroke_foreground = None
         self._pen_gestures_logged = False
+        # The brush cursor is a transient overlay: where it was last painted
+        # (window rect), so every move clears exactly that and nothing else
+        # lingers. Style: outline (the brush's size), crosshair, hidden.
+        self.brush_cursor = saved["brush_cursor"]
+        self._cursor_drawn = None
         # The capture and history set aside while selecting a new area, so
         # Esc (or a failed grab) can bring them back; dropped when the new
         # capture or full-monitor drawing actually starts.
@@ -1015,7 +1021,7 @@ class Overlay(QWidget):
     # -- More menu and Preferences ----------------------------------------------
 
     def _menu_popup(self):
-        menu = QFrame(None, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        menu = make_panel(QFrame(None))
         menu.setObjectName("Toolbar")
         menu.setStyleSheet(C.TOOLBAR_STYLE + C.FIELD_STYLE + C.MENU_STYLE)
         v = QVBoxLayout(menu)
@@ -1123,6 +1129,24 @@ class Overlay(QWidget):
             b.clicked.connect(lambda checked=False, n=name: (self._set_pressure_curve(n), self._sync_prefs()))
             r.addWidget(b)
             self.pressure_buttons[name] = b
+        r.addStretch(1)
+        v.addLayout(r)
+        self._menu_heading(pop, v, "BRUSH CURSOR")
+        r = QHBoxLayout()
+        r.setSpacing(2)
+        self.cursor_buttons = {}
+        for name, tip in (("outline", "A circle the size of the brush"), ("crosshair", "A small crosshair"),
+                          ("hidden", "No brush cursor")):
+            b = QToolButton(pop)
+            b.setObjectName("Seg")
+            b.setText(name.capitalize())
+            b.setCheckable(True)
+            b.setChecked(name == self.brush_cursor)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda checked=False, n=name: self._set_brush_cursor(n))
+            r.addWidget(b)
+            self.cursor_buttons[name] = b
         r.addStretch(1)
         v.addLayout(r)
         self._menu_heading(pop, v, "STABILIZER")
@@ -1721,6 +1745,7 @@ class Overlay(QWidget):
             recent_colors=self.recent_colors,
             favorite_colors=self.favorite_colors,
             toolbar_positions=self._toolbar_positions,
+            brush_cursor=self.brush_cursor,
         )
 
     # State setters. Every mutable tool property goes through one of these,
@@ -2463,7 +2488,7 @@ class Overlay(QWidget):
                 return
             self._adjust = {"anchor": QPointF(view_pos), "size": self._active_size(),
                             "opacity": self._active_opacity()}
-            self.cursor_pos = self._to_doc(view_pos)
+            self._move_cursor(self._to_doc(view_pos))
             self.setCursor(Qt.CursorShape.BlankCursor)
             self._show_size_preview()
         elif kind == "move" and self._adjust is not None:
@@ -2537,6 +2562,8 @@ class Overlay(QWidget):
         (Text editing handles its own Esc: cancel the edit.)"""
         if self._grabbing:
             return
+        if close_panels():
+            return  # an open panel (brush picker, menu, colors) closes first
         if self._adjust is not None:
             self._adjust_input("release", QPointF())
             return
@@ -2676,6 +2703,7 @@ class Overlay(QWidget):
         """Hide everything this window shows, keeping all state: strokes,
         undo history, region, margin, backdrop and pass-through all come
         back as they were. Nothing repaints or polls while hidden."""
+        close_panels()
         self._commit_text()
         if not self.isVisible():
             return
@@ -2847,7 +2875,7 @@ class Overlay(QWidget):
             return
         self.raw_pos = QPointF(pos)
         self.lazy_pos = QPointF(pos)
-        self.cursor_pos = QPointF(pos)
+        self._move_cursor(QPointF(pos))
         self.pressure = pressure if pressure > 0 else C.DEFAULT_PRESSURE
         use_eraser = self.mode == "eraser" if eraser is None else (eraser or self.mode == "eraser")
         # Brush size is on-screen size; a fitted (shrunk) capture gets a
@@ -2891,11 +2919,9 @@ class Overlay(QWidget):
         if self.pass_through or not self.current:
             return
         if self.current.shape is not None:
-            prev_cursor = self.cursor_pos
-            self.cursor_pos = QPointF(pos)
+            self._move_cursor(QPointF(pos))
             self._shape_raw_end = QPointF(pos)
             self._update_shape_end()
-            self._mark_dirty(prev_cursor, self.cursor_pos)
             return
         if self._mp is None:
             return
@@ -2903,7 +2929,7 @@ class Overlay(QWidget):
         # event still goes to libmypaint with its time step, so its own
         # dynamics see a steady stream even while the lazy point rests.
         prev_cursor = self.cursor_pos
-        self.cursor_pos = QPointF(pos)
+        self._move_cursor(QPointF(pos))
         if self.smoothing > 0.02:
             self._advance_lazy(QPointF(pos))
         else:
@@ -3147,6 +3173,8 @@ class Overlay(QWidget):
     def _handle_tablet_event(self, event):
         event_type = event.type()
         raw_pressure = float(event.pressure())
+        if event.type() == QEvent.Type.TabletPress:
+            close_panels()
         pressure = self._tablet_pressure(event)
         self._tilt = mypaint_engine.tilt(event.xTilt(), event.yTilt())
         self._diag_event("tablet", event, raw_pressure, pressure)
@@ -3229,6 +3257,8 @@ class Overlay(QWidget):
                 self._add_point(pos, pressure)
             elif self._tablet_contact and (self._drag is not None or self._text_dragging):
                 self._annotation_move(pos)
+            elif not self._tablet_contact and self.current is None:
+                self._move_cursor(pos)
         elif event_type == QEvent.Type.TabletRelease:
             self._tablet_contact = False
             self._annotation_release()
@@ -3244,6 +3274,7 @@ class Overlay(QWidget):
 
     def mousePressEvent(self, event):
         self._diag_event("mouse", event)
+        close_panels()
         try:
             if self._is_tablet_synthesized():
                 event.accept()
@@ -3310,9 +3341,7 @@ class Overlay(QWidget):
             elif event.buttons() & Qt.MouseButton.LeftButton and not self._point_over_ui(pos):
                 self._add_point(self._to_doc(pos), 0.65)
             else:
-                prev_cursor = self.cursor_pos
-                self.cursor_pos = self._to_doc(pos)
-                self._mark_dirty(prev_cursor, self.cursor_pos)
+                self._move_cursor(self._to_doc(pos))
         except Exception:
             logger.exception("Error handling mouse move")
             event.accept()
@@ -3681,8 +3710,11 @@ class Overlay(QWidget):
 
             # Not while capturing: a real mouse move during the capture delay
             # sets cursor_pos again and would put the ring in the screenshot.
+            self._cursor_drawn = None
             if (not self.pass_through and self.cursor_pos and not self._selecting and not self._capturing
-                    and not self._wants_pan() and self.mode not in ("text", "select")):
+                    and not self._wants_pan() and self.mode not in ("text", "select")
+                    and self.brush_cursor != "hidden"):
+                self._cursor_drawn = self._cursor_rect()
                 painter.save()
                 # Ring and guide in window coordinates, at on-screen size.
                 cursor_view = self._to_view(self.cursor_pos)
@@ -3698,13 +3730,61 @@ class Overlay(QWidget):
                     ring_color.setAlpha(220)
                 painter.setPen(QPen(ring_color, 1.4))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawEllipse(cursor_view, d / 2, d / 2)
+                if self.brush_cursor == "crosshair":
+                    arm = self._CROSSHAIR / 2
+                    painter.setPen(QPen(QColor(0, 0, 0, 150), 3))
+                    painter.drawLine(QPointF(cursor_view.x() - arm, cursor_view.y()),
+                                     QPointF(cursor_view.x() + arm, cursor_view.y()))
+                    painter.drawLine(QPointF(cursor_view.x(), cursor_view.y() - arm),
+                                     QPointF(cursor_view.x(), cursor_view.y() + arm))
+                    painter.setPen(QPen(QColor(255, 255, 255, 230), 1.2))
+                    painter.drawLine(QPointF(cursor_view.x() - arm, cursor_view.y()),
+                                     QPointF(cursor_view.x() + arm, cursor_view.y()))
+                    painter.drawLine(QPointF(cursor_view.x(), cursor_view.y() - arm),
+                                     QPointF(cursor_view.x(), cursor_view.y() + arm))
+                else:
+                    painter.drawEllipse(cursor_view, d / 2, d / 2)
                 if lazy_view is not None and self.smoothing > 0.02:
                     painter.setPen(QPen(QColor(255, 255, 255, 95), 1))
                     painter.drawLine(lazy_view, cursor_view)
                 painter.restore()
         finally:
             painter.end()
+
+    _CROSSHAIR = 16
+
+    def _cursor_rect(self):
+        """Window rect the brush cursor covers now: the ring (or crosshair),
+        the size preview, and the stabilizer guide to the lazy point."""
+        if self.cursor_pos is None:
+            return None
+        c = self._to_view(self.cursor_pos)
+        r = max(self._ring_diameter(), self._CROSSHAIR) / 2 + 4
+        rect = QRectF(c.x() - r, c.y() - r, 2 * r, 2 * r)
+        if self.lazy_pos is not None and self.smoothing > 0.02:
+            lz = self._to_view(self.lazy_pos)
+            rect = rect.united(QRectF(lz.x() - 2, lz.y() - 2, 4, 4))
+        return rect.toAlignedRect()
+
+    def _move_cursor(self, doc_pos):
+        """Move the brush cursor: repaint where it was last drawn and where
+        it goes, so only one is ever visible."""
+        old = self._cursor_drawn
+        self.cursor_pos = doc_pos
+        if old is not None:
+            self.update(old.adjusted(-2, -2, 2, 2))
+        new = self._cursor_rect()
+        if new is not None:
+            self.update(new.adjusted(-2, -2, 2, 2))
+
+    def _set_brush_cursor(self, style):
+        if style in C.BRUSH_CURSORS:
+            self.brush_cursor = style
+            if hasattr(self, "cursor_buttons"):
+                for name, b in self.cursor_buttons.items():
+                    b.setChecked(name == style)
+            self._save_settings()
+            self.update()
 
     def _ring_diameter(self):
         """On-screen diameter of the brush ring: the size under the pen

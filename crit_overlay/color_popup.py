@@ -4,8 +4,8 @@ A large swatch of the current color with a HEX entry and the eyedropper,
 a saturation/value field with a hue strip for any color,
 the crit palette, the colors you used last, and favorites you pin (click
 + to pin the current color, right-click a favorite to remove it). The native
-QColorDialog is one click away for anything else. Qt.WindowType.Popup
-handles click-outside-to-dismiss.
+QColorDialog is one click away for anything else. It closes on Esc, on losing activation, or when the canvas is pressed
+(ui_widgets.make_panel).
 """
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdi
 
 from . import constants as C
 from . import icons
-from .ui_widgets import HexValidator, place_popup
+from .ui_widgets import make_panel, HexValidator, place_popup
 
 _COLUMNS = 8
 SWATCH = 18
@@ -145,7 +145,8 @@ class HueStrip(QWidget):
 
 class ColorPopup(QFrame):
     def __init__(self, overlay):
-        super().__init__(None, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        super().__init__(None)
+        make_panel(self)
         self._overlay = overlay
         self.setObjectName("Toolbar")
         self.setStyleSheet(C.TOOLBAR_STYLE + C.FIELD_STYLE)

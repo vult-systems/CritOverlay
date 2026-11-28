@@ -9,8 +9,9 @@ Built on plain Qt; see the UI notes in the commit for why no widget library.
 """
 
 import re
+import weakref
 
-from PySide6.QtCore import QPoint, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QPainter, QValidator
 from PySide6.QtWidgets import (QAbstractSpinBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
                                QSizePolicy, QSlider, QSpinBox, QToolButton, QVBoxLayout, QWidget)
@@ -34,10 +35,59 @@ def clamp_popup(size, anchor, avail, gap=6, align="left"):
     return QPoint(x, y)
 
 
+# -- floating panels ------------------------------------------------------------
+#
+# The toolbar's panels (brush picker, colors, menus, sliders) are tool
+# windows, not Qt popups. While a Qt popup is open, Qt's Windows backend
+# turns pen contact into mouse input, so the stroke that dismissed a popup
+# (the first after picking a brush) drew without pressure. A panel closes
+# on Esc, when it loses activation, or when the canvas is pressed
+# (close_panels), and the press still reaches the canvas as a pen.
+
+PANEL_FLAGS = Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+_panels = weakref.WeakSet()
+
+
+class _PanelFilter(QObject):
+    def eventFilter(self, obj, event):
+        t = event.type()
+        if t == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+            obj.close()
+            return True
+        if t == QEvent.Type.WindowDeactivate and obj.isVisible():
+            # Deferred: activation can pass between the panel's own widgets.
+            QTimer.singleShot(0, lambda o=obj: o.isVisible() and not o.isActiveWindow() and o.close())
+        return False
+
+
+_filter = _PanelFilter()
+
+
+def make_panel(frame):
+    """Give a top-level QFrame the floating-panel behavior."""
+    frame.setWindowFlags(PANEL_FLAGS)
+    frame.installEventFilter(_filter)
+    _panels.add(frame)
+    return frame
+
+
+def close_panels(keep=None):
+    """Close every open panel (except `keep`). Returns True if any was open."""
+    closed = False
+    for p in list(_panels):
+        if p is not keep and p.isVisible():
+            p.close()
+            closed = True
+    return closed
+
+
 def place_popup(popup, anchor_widget, align="left", gap=6):
     """Show `popup` below `anchor_widget`, entirely on the anchor's monitor
     (popups are top-level windows; with monitors at different scales Qt
-    would otherwise let them spill onto a neighbour)."""
+    would otherwise let them spill onto a neighbour). One panel at a time."""
+    if popup not in _panels:
+        make_panel(popup)
+    close_panels(keep=popup)
     popup.adjustSize()
     top_left = anchor_widget.mapToGlobal(QPoint(0, 0))
     anchor = QRect(top_left, anchor_widget.size())
@@ -45,10 +95,12 @@ def place_popup(popup, anchor_widget, align="left", gap=6):
     popup.move(clamp_popup(popup.sizeHint().expandedTo(popup.size()), anchor, screen.availableGeometry(),
                            gap, align))
     popup.show()
+    popup.raise_()
+    popup.activateWindow()
 
 
 def popup_frame():
-    frame = QFrame(None, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+    frame = make_panel(QFrame(None))
     frame.setObjectName("Toolbar")
     frame.setStyleSheet(C.TOOLBAR_STYLE + C.FIELD_STYLE)
     return frame

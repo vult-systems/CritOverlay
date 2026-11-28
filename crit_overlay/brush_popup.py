@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QToolButton, QVBoxLay
 from . import brush_preview
 from . import brushes
 from . import constants as C
-from .ui_widgets import place_popup
+from .ui_widgets import make_panel, place_popup
 
 TILE_INK = "#ececef"  # previews in a neutral ink, so brushes compare on shape and texture
 
@@ -36,7 +36,8 @@ def _button(parent, text, tooltip, slot):
 
 class BrushPopup(QFrame):
     def __init__(self, overlay):
-        super().__init__(None, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        super().__init__(None)
+        make_panel(self)
         self._overlay = overlay
         self.setObjectName("Toolbar")
         self.setStyleSheet(C.TOOLBAR_STYLE)
@@ -113,7 +114,8 @@ class BrushPopup(QFrame):
 
 class EraserPopup(QFrame):
     def __init__(self, overlay):
-        super().__init__(None, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        super().__init__(None)
+        make_panel(self)
         self._overlay = overlay
         self.setObjectName("Toolbar")
         self.setStyleSheet(C.TOOLBAR_STYLE)

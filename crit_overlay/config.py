@@ -130,6 +130,7 @@ class AppConfig:
             "recent_colors": self._colors("brush/recent_colors", C.RECENT_COLORS),
             "favorite_colors": self._colors("brush/favorite_colors", C.FAVORITE_COLORS),
             "toolbar_positions": self._positions(),
+            "brush_cursor": self._pick("ui/brush_cursor", "outline", C.BRUSH_CURSORS),
         }
 
     def _positions(self):
@@ -187,7 +188,7 @@ class AppConfig:
              text_family=None, text_size=C.DEFAULT_TEXT_SIZE, text_bold=False, text_align="left",
              eraser_size=None, brush_preset=None, brush_pressure=None, pressure_curve=None,
              eraser_style=None, eraser_opacity=None, recent_colors=None, favorite_colors=None,
-             toolbar_positions=None):
+             toolbar_positions=None, brush_cursor=None):
         self._settings.setValue("brush/color", QColor(color).name())
         self._settings.setValue("brush/size", round(float(size), 2))
         if eraser_size is not None:
@@ -204,6 +205,8 @@ class AppConfig:
             self._settings.setValue("brush/recent_colors", ",".join(recent_colors))
         if favorite_colors is not None:
             self._settings.setValue("brush/favorite_colors", ",".join(favorite_colors))
+        if brush_cursor:
+            self._settings.setValue("ui/brush_cursor", brush_cursor)
         if toolbar_positions is not None:
             import json
             self._settings.setValue("ui/toolbar_positions",

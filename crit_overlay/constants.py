@@ -33,6 +33,7 @@ DEFAULT_ERASER_SIZE = 24
 # more force.
 PRESSURE_CURVES = {"soft": 0.6, "normal": 1.0, "firm": 1.7}
 ERASER_STYLES = ("hard", "soft")
+BRUSH_CURSORS = ("outline", "crosshair", "hidden")
 DEFAULT_OPACITY = 1.0
 DEFAULT_SMOOTHING = 0.0
 DEFAULT_PRESSURE = 0.65

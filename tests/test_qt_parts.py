@@ -117,6 +117,7 @@ class MigrationTests(unittest.TestCase):
             "brush_pressure": {},
             "pressure_curve": "normal", "eraser_style": "hard", "eraser_opacity": 1.0,
             "recent_colors": [], "favorite_colors": [], "toolbar_positions": {},
+            "brush_cursor": "outline",
         })
         q = QSettings(str(self.path), QSettings.Format.IniFormat)
         self.assertEqual(int(q.value("meta/settings_version")), SETTINGS_VERSION)
