@@ -16,7 +16,7 @@ the IT staff who manage them.
 ## Getting it onto a machine
 
 1. Download the release zip and check its SHA-256 against `SHA256SUMS.txt`:
-   `certutil -hashfile CritOverlay-v1.5.0-rc.4-win64.zip SHA256`
+   `certutil -hashfile CritOverlay-v1.5.0-rc.5-win64.zip SHA256`
 2. Right-click the zip > Properties > **Unblock**, then extract it. Files
    extracted from a downloaded zip carry the "mark of the web", which makes
    SmartScreen prompt for the exe (and is reported by `--diagnose` as

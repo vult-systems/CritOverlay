@@ -1,9 +1,11 @@
 # Changelog
 
-## Unreleased
+## v1.5.0-rc.5 (pre-release)
 
-The v1.5.0 feature freeze was reopened for the centered capture workflow
-(#23).
+Fifth release candidate for v1.5.0: the centered capture workflow (#23),
+added by reopening the feature freeze for it. Everything listed under
+rc.4, rc.3, rc.2 and rc.1 also applies. v1.4.2 stays the stable release
+until the acceptance checks in #4 pass.
 
 **Added**
 
