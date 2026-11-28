@@ -14,3 +14,8 @@ assets/icon.ico
 # Portable-mode data when running from source with CritOverlay.ini.
 CritOverlay-data/
 CritOverlay.ini
+
+# libmypaint comparison build (third_party/libmypaint/build_libmypaint.py).
+third_party/libmypaint/.cache/
+third_party/libmypaint/.build/
+crit_overlay/mypaint/

@@ -2,13 +2,17 @@ import logging
 import os
 import subprocess
 import time
+from collections import deque
 from datetime import datetime
 
-from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal, QEvent
+from PySide6.QtCore import QMimeData, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal, QEvent
 from PySide6.QtGui import (
     QAction,
     QColor,
     QCursor,
+    QFont,
+    QFontMetricsF,
+    QIcon,
     QGuiApplication,
     QKeySequence,
     QPainter,
@@ -20,15 +24,19 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QColorDialog,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
     QSlider,
     QToolButton,
+    QVBoxLayout,
     QWidget,
 )
 
 from . import brush
+from . import brushes
+from . import mypaint_engine
 from . import capture as capture_mod
 from . import compat
 from . import constants as C
@@ -36,12 +44,21 @@ from . import icons
 from . import native_windows
 from . import paths
 from . import region as region_mod
+from . import selection as sel_mod
+from . import text_fonts
+from .brush_popup import BrushPopup
 from .color_popup import ColorPopup
 from .config import AppConfig
-from .models import History, Stroke
+from .models import SHAPES, History, Stroke, TextStyle
 from .native_windows import set_click_through
 from .pass_through_badge import PassThroughBadge
 from .region_popup import RegionPopup
+from .shape_popup import SHAPE_LABELS, ShapePopup
+from .text_edit import TextEditor
+from .ui_widgets import (MenuRow, ToolbarGrip, close_panels, make_panel, percent_field, place_popup, px_field,
+                         size_field)
+from .color_popup import swatch_icon
+from . import brush_preview
 
 logger = logging.getLogger(f"{C.ORG_NAME}.overlay")
 
@@ -60,6 +77,7 @@ _ZERO_PRESSURE_EVENTS = 6
 
 class Overlay(QWidget):
     status_changed = Signal(str)
+    autostart_toggled = Signal(bool)
     # Emitted when Esc or the toolbar hides the overlay to the tray, so the
     # tray can say once where it went.
     hidden_to_tray = Signal()
@@ -108,21 +126,85 @@ class Overlay(QWidget):
 
         self.history = History(C.MAX_STROKE_HISTORY)
         self.current = None
-        # Incremental buffer for the stroke being drawn. Rebuilding the
-        # whole stroke's smoothed path and offscreen layer on every
-        # paintEvent cost more per frame the longer the stroke got. See
-        # _extend_live_layer().
+        # Live preview of the stroke being drawn: libmypaint's surface so far
+        # (_feed_mypaint), composited by paintEvent at the stroke's opacity.
         self._live_layer = None
         self._live_layer_origin = None
-        self._live_baked_index = 0
 
         self.mode = "brush"
         self._pre_eyedropper_mode = "brush"
+        # The shape the toolbar's shape button selects (see _set_mode).
+        self._last_shape = "rect"
+        self._shape_popup = None
+        # Unconstrained drag end of the shape being drawn, so pressing or
+        # releasing Shift mid-drag can re-apply the constraint.
+        self._shape_raw_end = None
+        # Text tool. _text_edit is the text being typed (a Stroke with shape
+        # "text"), drawn live and committed to history like any stroke.
+        self.text_family = saved["text_family"]
+        self.text_size = saved["text_size"]
+        self.text_bold = saved["text_bold"]
+        self.text_align = saved["text_align"]
+        self._text_edit = None
+        self._editor = None          # TextEditor for _text_edit
+        self._text_original = None   # committed text being re-edited
+        self._text_dragging = False  # dragging a text selection
+        # Select tool. selection is a committed shape or text annotation.
+        # While it is dragged, _floating is its moved/resized preview and
+        # the canvas is rebuilt without _hidden_stroke (the original).
+        self.selection = None
+        self._floating = None
+        self._hidden_stroke = None
+        self._drag = None
+        self._last_select_press = (0.0, None)
+        self._annotation_clipboard = None
+        self._paste_count = 0
         self.color = QColor(saved["color"])
         # Named brush_size (not `size`) so it never shadows QWidget.size().
         self.brush_size = saved["size"]
         self.opacity = saved["opacity"]
         self.smoothing = saved["smoothing"]
+        # Brushes (brushes.py; libmypaint draws every freehand stroke): the
+        # preset, per-preset pressure controls, a separate eraser size.
+        self.eraser_size = saved["eraser_size"]
+        self.brush_preset = saved["brush_preset"]
+        self.brush_pressure = dict(saved["brush_pressure"])  # key -> (size, opacity)
+        self._brush_popup = None
+        self._input_has_pressure = False
+        self._size_preview_until = 0.0
+        self.pressure_curve = saved["pressure_curve"]
+        self.eraser_opacity = saved["eraser_opacity"]
+        self.recent_colors = list(saved["recent_colors"])
+        self.favorite_colors = list(saved["favorite_colors"])
+        self.eraser_style = saved["eraser_style"]
+        self._eraser_popup = None
+        self._tilt = (0.0, 0.0)      # last pen tilt, libmypaint units
+        self._mp = None              # mypaint_engine.StrokePainter while drawing
+        self._mp_last_time = 0.0
+        self._mp_has_pressure = False
+        self._stroke_pressure = 1.0  # pressure at the latest point of the stroke being drawn
+        # Input diagnostic (Ctrl+Shift+I): what the last input event really
+        # carried, to check a pen end to end.
+        self.show_input_diag = False
+        self._diag = {}
+        self._seen_devices = set()
+        # Recent input events, for logging the sequence of a stroke that
+        # came without pressure next to one that had it.
+        self._input_log = deque(maxlen=96)
+        self._pen_seen = False
+        self._strokes_to_log = 5      # summaries for the first strokes after each show
+        self._stroke_log_start = 0
+        self._stroke_foreground = None
+        self._pen_gestures_logged = False
+        # The brush cursor is a transient overlay: where it was last painted
+        # (window rect), so every move clears exactly that and nothing else
+        # lingers. Style: outline (the brush's size), crosshair, hidden.
+        self.brush_cursor = saved["brush_cursor"]
+        self._cursor_drawn = None
+        # The capture and history set aside while selecting a new area, so
+        # Esc (or a failed grab) can bring them back; dropped when the new
+        # capture or full-monitor drawing actually starts.
+        self._stashed_session = None
         self.backdrop = saved["backdrop"]
         self.backdrop_opacity = saved["backdrop_opacity"]
         self.pass_through = False
@@ -199,7 +281,19 @@ class Overlay(QWidget):
         self._backdrop_rebuild_timer.timeout.connect(self._apply_debounced_backdrop_rebuild)
 
         self._color_popup = None
+        text_fonts.load()
+        self._ui_hidden = False
+        self._adjust = None          # Alt+right-drag size/opacity, {"anchor", "size", "opacity"}
+        self._peek = False           # H held: annotations hidden (before/after)
+        self._alt_pick = False       # Alt held: Alt+click picks a color
+        self._mid_pan = False        # middle-button pan in progress
+        self._toolbar_positions = dict(saved.get("toolbar_positions", {}))
         self.panel = self._build_panel()
+        self.prefs_popup = self._build_prefs()
+        self.more_menu = self._build_more_menu()
+        self._fix_panel_width()
+        self._sync_text_bar()
+        self.panel.installEventFilter(self)
         self._refresh_monitor_button()
         self.panel.adjustSize()
         self._refresh_history_buttons()
@@ -302,6 +396,10 @@ class Overlay(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        if QGuiApplication.platformName() == "windows":
+            if native_windows.disable_pen_gestures(int(self.winId())) and not self._pen_gestures_logged:
+                self._pen_gestures_logged = True
+                logger.info("Pen press-and-hold, flicks and pen feedback off for the overlay")
         self._alignment_retries = 1
         self._alignment_timer.start(250)
         if self._resume_on_show:
@@ -388,6 +486,7 @@ class Overlay(QWidget):
             self.status_changed.emit(f"Monitor connected. F7 switches monitors ({n} of {total})")
 
     def move_to_next_screen(self):
+        self._commit_text()
         target = compat.next_monitor(self._ordered_screens(), self._target_screen)
         if target is None:
             self.status_changed.emit("Only one monitor connected")
@@ -412,6 +511,7 @@ class Overlay(QWidget):
         else:
             self.raise_()
             self.activateWindow()
+            self.claim_foreground("monitor switch")
         self.status_changed.emit(f"Monitor {n} of {total}")
 
     def _refresh_monitor_button(self):
@@ -475,12 +575,27 @@ class Overlay(QWidget):
     def _anchor_local_rect(self):
         return self._anchor_screen().geometry().translated(-self.geometry().topLeft())
 
+    def _monitor_key(self):
+        s = self._anchor_screen()
+        g = s.geometry()
+        return f"{s.name()}@{g.x()},{g.y()},{g.width()}x{g.height()}"
+
+    def _clamp_panel(self, x, y, local):
+        x = max(local.x() + 4, min(x, local.x() + local.width() - self.panel.width() - 4))
+        y = max(local.y() + 4, min(y, local.y() + local.height() - self.panel.height() - 4))
+        return x, y
+
     def _place_chrome(self):
         local = self._anchor_local_rect()
-        panel_x = local.x() + max(16, (local.width() - self.panel.width()) // 2)
-        panel_y = local.y() + C.PANEL_MARGIN_TOP
+        saved = self._toolbar_positions.get(self._monitor_key())
+        if saved is not None:
+            panel_x, panel_y = self._clamp_panel(local.x() + saved[0], local.y() + saved[1], local)
+        else:
+            panel_x = local.x() + max(16, (local.width() - self.panel.width()) // 2)
+            panel_y = local.y() + C.PANEL_MARGIN_TOP
         self.panel.move(panel_x, panel_y)
-        self._toast_anchor = (local, panel_y + self.panel.height() + C.TOAST_GAP)
+        below = panel_y + self.panel.height()
+        self._toast_anchor = (local, below + C.TOAST_GAP)
         if self.toast_label.isVisible():
             self._position_toast()
         if hasattr(self, "_pass_through_badge"):
@@ -497,9 +612,56 @@ class Overlay(QWidget):
         badge.move(x, y)
 
     def _position_toast(self):
-        local, y = self._toast_anchor
-        x = local.x() + max(16, (local.width() - self.toast_label.width()) // 2)
-        self.toast_label.move(x, y)
+        """Under the toolbar, unless that would cover the captured artwork;
+        then above the toolbar or at the bottom of the monitor, whichever
+        stays clear of it."""
+        local, y_below = self._toast_anchor
+        t = self.toast_label
+        x = local.x() + max(16, (local.width() - t.width()) // 2)
+        panel = self.panel.geometry()
+        candidates = [
+            QPoint(panel.x() + (panel.width() - t.width()) // 2, y_below),
+            QPoint(panel.x() + (panel.width() - t.width()) // 2, panel.y() - C.TOAST_GAP - t.height()),
+            QPoint(x, local.y() + local.height() - t.height() - 24),
+        ]
+        art = self._artwork_view_rect()
+        chosen = candidates[0]
+        if art is not None:
+            def overlap(c):
+                r = QRect(c, t.size())
+                if not local.contains(r):
+                    return 1 << 30
+                i = r.intersected(art)
+                return 0 if i.isEmpty() else i.width() * i.height()
+            chosen = min(candidates, key=overlap)  # first wins ties
+        chosen.setX(max(local.x() + 8, min(chosen.x(), local.x() + local.width() - t.width() - 8)))
+        t.move(chosen)
+
+    def _artwork_view_rect(self):
+        """The captured image on screen (the margin around it is fine to
+        cover)."""
+        if getattr(self, "capture", None) is None:
+            return None
+        return self.capture.transform().mapRect(QRectF(self.capture.image_rect())).toAlignedRect()
+
+    def _grip_moved(self, global_pos, grab_offset):
+        local = self._anchor_local_rect()
+        p = self.mapFromGlobal(global_pos) - grab_offset
+        x, y = self._clamp_panel(p.x(), p.y(), local)
+        self.panel.move(x, y)
+        self._toast_anchor = (local, y + self.panel.height() + C.TOAST_GAP)
+        if self.toast_label.isVisible():
+            self._position_toast()
+
+    def _grip_released(self):
+        local = self._anchor_local_rect()
+        self._toolbar_positions[self._monitor_key()] = (self.panel.x() - local.x(), self.panel.y() - local.y())
+        self._save_settings()
+
+    def _grip_reset(self):
+        self._toolbar_positions.pop(self._monitor_key(), None)
+        self._place_chrome()
+        self._save_settings()
 
     # -- UI construction -----------------------------------------------
 
@@ -538,6 +700,9 @@ class Overlay(QWidget):
         return widget
 
     def eventFilter(self, obj, event):
+        if obj is getattr(self, "panel", None) and event.type() in (QEvent.Type.Show, QEvent.Type.Hide):
+            self._sync_text_bar()
+            return False
         if event.type() == QEvent.Type.Enter:
             tip = obj.toolTip()
             if tip:
@@ -564,112 +729,938 @@ class Overlay(QWidget):
         self.hover_tip.show()
         self.hover_tip.raise_()
 
+    # -- chrome: one floating toolbar ------------------------------------------
+    #
+    # One component: tools on top, the current tool's (or selection's)
+    # properties underneath, at a fixed width so switching tools never moves
+    # or resizes anything. Values are scrub fields (drag, scroll, or click
+    # for a slider and entry). Canvas, export and app commands are in the
+    # More menu; persistent preferences in a small Preferences popup. Tab
+    # hides the toolbar.
+
+    def _tool_button(self, parent, icon_name, tooltip, checkable=False, layout=None):
+        btn = QToolButton(parent)
+        btn.setIcon(icons.build_icon(icon_name))
+        btn.setIconSize(QSize(C.ICON_SIZE, C.ICON_SIZE))
+        btn.setCheckable(checkable)
+        btn.setAutoRaise(True)
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._hoverable(btn, tooltip)
+        if layout is not None:
+            layout.addWidget(btn)
+        return btn
+
+    @staticmethod
+    def _separator(parent, layout):
+        line = QFrame(parent)
+        line.setObjectName("Sep")
+        line.setFixedWidth(1)
+        line.setFixedHeight(20)
+        layout.addWidget(line)
+
     def _build_panel(self):
         panel = QFrame(self)
         panel.setObjectName("Toolbar")
-        panel.setStyleSheet(C.TOOLBAR_STYLE)
-        layout = QHBoxLayout(panel)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(4)
+        panel.setStyleSheet(C.TOOLBAR_STYLE + C.FIELD_STYLE)
+        v = QVBoxLayout(panel)
+        v.setContentsMargins(6, 6, 6, 6)
+        v.setSpacing(5)
+        top = QHBoxLayout()
+        top.setSpacing(1)
+        v.addLayout(top)
 
-        def sep():
-            line = QFrame(panel)
-            line.setObjectName("Sep")
-            line.setFixedWidth(1)
-            line.setFixedHeight(26)
-            layout.addWidget(line)
+        def tool(icon_name, tooltip, checkable=False):
+            return self._tool_button(panel, icon_name, tooltip, checkable, top)
 
-        def tool_button(icon_name, tooltip, checkable=False):
-            btn = QToolButton(panel)
-            btn.setIcon(icons.build_icon(icon_name))
-            btn.setIconSize(QSize(20, 20))
-            btn.setCheckable(checkable)
-            btn.setAutoRaise(True)
-            self._hoverable(btn, tooltip)
-            layout.addWidget(btn)
-            return btn
-
-        self.brush_btn = tool_button("brush", "Brush (B)", checkable=True)
-        self.eraser_btn = tool_button("eraser", "Eraser (E)", checkable=True)
-        self.eyedropper_btn = tool_button("eyedropper", "Eyedropper (Alt+click)", checkable=True)
-        self.brush_btn.setChecked(self.mode == "brush")
-        self.eraser_btn.setChecked(self.mode == "eraser")
-        self.eyedropper_btn.setChecked(self.mode == "eyedropper")
-        self.brush_btn.clicked.connect(lambda: self._set_mode("brush"))
-        self.eraser_btn.clicked.connect(lambda: self._set_mode("eraser"))
+        self.grip = ToolbarGrip(panel, self._grip_moved, self._grip_released, self._grip_reset)
+        self._hoverable(self.grip, "Drag to move the toolbar (remembered per monitor). Double-click to reset")
+        top.addWidget(self.grip)
+        self.select_btn = tool("select", "Select and move (V)", True)
+        self.brush_btn = tool("brush", "Brush (B). Click again to choose a brush", True)
+        self.eraser_btn = tool("eraser", "Eraser (E). Click again for hard or soft", True)
+        self.shape_btn = tool(self._last_shape, "Shapes (U cycles). Click again to choose", True)
+        self.text_btn = tool("text", "Text (T). Ctrl+Enter commits, Esc cancels", True)
+        self.eyedropper_btn = tool("eyedropper", "Eyedropper (I, or Alt+click while drawing)", True)
+        self.select_btn.clicked.connect(lambda: self._set_mode("select"))
+        self.brush_btn.clicked.connect(self._on_brush_button)
+        self.eraser_btn.clicked.connect(self._on_eraser_button)
+        self.shape_btn.clicked.connect(self._on_shape_button)
+        self.text_btn.clicked.connect(lambda: self._set_mode("text"))
         self.eyedropper_btn.clicked.connect(self._toggle_eyedropper)
+        for btn, mode in ((self.select_btn, "select"), (self.brush_btn, "brush"), (self.eraser_btn, "eraser"),
+                          (self.text_btn, "text"), (self.eyedropper_btn, "eyedropper")):
+            btn.setChecked(self.mode == mode)
+        self.shape_btn.setChecked(self.mode in SHAPES)
 
-        sep()
-
-        self.color_btn = QToolButton(panel)
-        self.color_btn.setIcon(icons.build_color_swatch_icon(self.color.name()))
-        self.color_btn.setIconSize(QSize(20, 20))
-        self.color_btn.setAutoRaise(True)
-        self.color_btn.clicked.connect(self._show_color_popup)
-        self._hoverable(self.color_btn, "Brush color")
-        layout.addWidget(self.color_btn)
-
-        self.backdrop_btn = QToolButton(panel)
-        self.backdrop_btn.setIcon(self._backdrop_icon(self.backdrop))
-        self.backdrop_btn.setIconSize(QSize(20, 20))
-        self.backdrop_btn.setAutoRaise(True)
-        self.backdrop_btn.clicked.connect(self._cycle_backdrop)
-        self._hoverable(self.backdrop_btn, f"Backdrop: {self._BACKDROP_LABEL[self.backdrop]} (click to cycle)")
-        layout.addWidget(self.backdrop_btn)
-
-        # Checked while a custom region is set; clicking opens the region
-        # and margin popup.
-        self.region_btn = tool_button("region", "Drawing region and margin (R to select)", checkable=True)
-        self.region_btn.clicked.connect(self._show_region_popup)
-
-        sep()
-
-        size_row, self.size_slider, self.size_value_label = self._build_slider_row(
-            panel, "SIZE", C.MIN_SIZE, C.MAX_SIZE, self.brush_size, lambda v: f"{v}px",
-            self._on_size_slider_changed, "Brush size ([ / ])"
-        )
-        layout.addWidget(size_row)
-
-        opacity_row, self.opacity_slider, self.opacity_value_label = self._build_slider_row(
-            panel, "OPACITY", 5, 100, int(self.opacity * 100), lambda v: f"{v}%",
-            self._on_opacity_slider_changed, "Stroke opacity"
-        )
-        layout.addWidget(opacity_row)
-
-        smoothing_row, self.smoothing_slider, self.smoothing_value_label = self._build_slider_row(
-            panel, "SMOOTH", 0, 90, int(self.smoothing * 100), lambda v: f"{v}%",
-            self._on_smoothing_slider_changed, "Stroke smoothing"
-        )
-        layout.addWidget(smoothing_row)
-
-        backdrop_opacity_row, self.backdrop_opacity_slider, self.backdrop_opacity_value_label = self._build_slider_row(
-            panel, "INTENSITY", 10, 100, int(self.backdrop_opacity * 100), lambda v: f"{v}%",
-            self._on_backdrop_opacity_slider_changed, "Backdrop intensity"
-        )
-        layout.addWidget(backdrop_opacity_row)
-
-        sep()
-
-        self.undo_btn = tool_button("undo", "Undo (Ctrl+Z)")
-        self.redo_btn = tool_button("redo", "Redo (Ctrl+Shift+Z)")
-        self.clear_btn = tool_button("clear", "Clear all")
+        self._separator(panel, top)
+        self.undo_btn = tool("undo", "Undo (Ctrl+Z)")
+        self.redo_btn = tool("redo", "Redo (Ctrl+Shift+Z)")
         self.undo_btn.clicked.connect(self.undo)
         self.redo_btn.clicked.connect(self.redo)
+        self._separator(panel, top)
+        self.clear_btn = tool("clear", "Clear all annotations (undo brings them back)")
         self.clear_btn.clicked.connect(self.clear)
-
-        sep()
-
-        self.monitor_btn = tool_button("monitor", "Next monitor (F7)")
-        self.monitor_btn.clicked.connect(self.move_to_next_screen)
-        self.pass_btn = tool_button("pass_through", "Pass-through (F8)", checkable=True)
-        self.snap_btn = tool_button("snapshot", "Screenshot (F9)")
-        self.exit_btn = tool_button("exit", "Exit (Esc)")
-        self.pass_btn.clicked.connect(self.toggle_pass_through)
+        top.addStretch(1)
+        self.capture_btn = tool("region", "Capture an area to annotate (R)")
+        self.snap_btn = tool("snapshot", "Screenshot with annotations (F9)")
+        self.capture_btn.clicked.connect(self.begin_region_selection)
         self.snap_btn.clicked.connect(self.capture_annotated)
-        self.exit_btn.clicked.connect(self.dismiss)
+        self.more_btn = tool("more", "More: canvas, export, app")
+        self.more_btn.clicked.connect(self._show_more_menu)
 
-        panel.adjustSize()
+        rule = QFrame(panel)
+        rule.setObjectName("Rule")
+        rule.setFixedHeight(1)
+        v.addWidget(rule)
+        self.props_bar = self._build_props_bar(panel)
+        v.addWidget(self.props_bar)
         return panel
+
+    # -- properties row ----------------------------------------------------------
+
+    _PROPS = {
+        "brush": ("preset", "size", "opacity", "color"),
+        "eraser": ("eraser_style", "size", "opacity"),
+        "shape": ("shape_type", "size", "opacity", "color"),
+        "text": ("text", "text_size", "opacity", "color"),
+        "select_text": ("text", "text_size", "opacity", "color"),
+        "select_shape": ("size", "opacity", "color"),
+        "select_none": ("hint",),
+        "eyedropper": ("color", "hint"),
+    }
+    _HINTS = {
+        "select_none": "Click an annotation to select it",
+        "eyedropper": "Click anywhere to pick a color",
+    }
+
+    def _build_props_bar(self, parent):
+        """The properties row. Nothing in it takes keyboard focus, so typing
+        text annotations and tool shortcuts keep working."""
+        bar = QWidget(parent)
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(2, 0, 2, 0)
+        layout.setSpacing(6)
+        bar.setFixedHeight(32)
+        sections = {}
+
+        def section(name):
+            w = QWidget(bar)
+            h = QHBoxLayout(w)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(2)
+            layout.addWidget(w)
+            sections[name] = w
+            return w, h
+
+        w, h = section("preset")
+        self.preset_btn = QToolButton(w)
+        self.preset_btn.setObjectName("Chip")
+        self.preset_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.preset_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.preset_btn.setIconSize(QSize(44, 18))
+        self.preset_btn.setFixedWidth(150)
+        self.preset_btn.clicked.connect(lambda: self._show_brush_popup(self.preset_btn))
+        self._hoverable(self.preset_btn, "Choose a brush (or click the Brush tool again)")
+        h.addWidget(self.preset_btn)
+
+        w, h = section("eraser_style")
+        self.eraser_style_btns = {}
+        for style, label, tip in (("hard", "Hard", "Hard eraser: clean, solid edge"),
+                                  ("soft", "Soft", "Soft eraser: feathered edge, light pressure erases partly")):
+            b = QToolButton(w)
+            b.setObjectName("Seg")
+            b.setText(label)
+            b.setCheckable(True)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.clicked.connect(lambda checked=False, s=style: self._set_eraser_style(s))
+            self._hoverable(b, tip)
+            h.addWidget(b)
+            self.eraser_style_btns[style] = b
+
+        w, h = section("shape_type")
+        self.shape_type_btns = {}
+        for shape in SHAPES:
+            b = self._tool_button(w, shape, f"{SHAPE_LABELS[shape]} (U cycles, Shift constrains)", True, h)
+            b.setIconSize(QSize(18, 18))
+            b.clicked.connect(lambda checked=False, s=shape: self._set_mode(s))
+            self.shape_type_btns[shape] = b
+
+        w, h = section("text")
+        self.font_combo = QComboBox(w)
+        self.font_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.font_combo.setFixedWidth(118)
+        for i, family in enumerate(text_fonts.FAMILIES):
+            self.font_combo.addItem(family)
+            self.font_combo.setItemData(i, QFont(family, 11), Qt.ItemDataRole.FontRole)
+        self.font_combo.setCurrentText(self.text_family)
+        self.font_combo.currentTextChanged.connect(self._set_text_family)
+        self._hoverable(self.font_combo, "Font")
+        h.addWidget(self.font_combo)
+        self.bold_btn = self._tool_button(w, "bold", "Bold", True, h)
+        self.bold_btn.setIconSize(QSize(16, 16))
+        self.bold_btn.setChecked(self.text_bold)
+        self.bold_btn.clicked.connect(lambda checked: self._set_text_bold(checked))
+        self.align_btns = {}
+        for align in C.TEXT_ALIGNS:
+            b = self._tool_button(w, f"align_{align}", f"Align {align}", True, h)
+            b.setIconSize(QSize(16, 16))
+            b.setChecked(align == self.text_align)
+            b.clicked.connect(lambda checked=False, a=align: self._set_text_align(a))
+            self.align_btns[align] = b
+        self.text_bar = w
+
+        w, h = section("size")
+        self.size_value_label = size_field("Size: drag, scroll or click. [ and ] step", w)
+        self.size_value_label.setValue(self.brush_size, emit=False)
+        self.size_value_label.valueChanged.connect(self._set_size)
+        self.size_slider = self.size_value_label.slider
+        h.addWidget(self.size_value_label)
+
+        w, h = section("text_size")
+        self.text_size_label = px_field("Size", C.MIN_TEXT_SIZE, C.MAX_TEXT_SIZE, "Text size: drag, scroll or click", w)
+        self.text_size_label.setValue(self.text_size, emit=False)
+        self.text_size_label.valueChanged.connect(self._set_text_size)
+        self.text_size_slider = self.text_size_label.slider
+        h.addWidget(self.text_size_label)
+
+        w, h = section("opacity")
+        self.opacity_value_label = percent_field("Opacity", 5, 100, "Opacity: drag, scroll or click", w)
+        self.opacity_value_label.setFixedWidth(110)
+        self.opacity_value_label.setValue(int(self.opacity * 100), emit=False)
+        self.opacity_value_label.valueChanged.connect(self._set_opacity)
+        self.opacity_slider = self.opacity_value_label.slider
+        h.addWidget(self.opacity_value_label)
+
+        w, h = section("color")
+        self.color_btn = QToolButton(w)
+        self.color_btn.setObjectName("Swatch")
+        self.color_btn.setIconSize(QSize(22, 22))
+        self.color_btn.setAutoRaise(True)
+        self.color_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.color_btn.clicked.connect(self._show_color_popup)
+        self._hoverable(self.color_btn, "Color: palette, recent, favorites, HEX, eyedropper (I)")
+        h.addWidget(self.color_btn)
+
+        w, h = section("hint")
+        self.props_hint = QLabel("", w)
+        self.props_hint.setObjectName("Hint")
+        self.props_hint.setMinimumWidth(260)
+        h.addWidget(self.props_hint)
+
+        layout.addStretch(1)
+        self._props_sections = sections
+        return bar
+
+    def _fix_panel_width(self):
+        """One width for every tool: the widest properties row (or the tool
+        row), measured once, so the toolbar never shifts."""
+        widest = 0
+        for ctx, names in self._PROPS.items():
+            total = 0
+            shown = [self._props_sections[n] for n in names]
+            for w in shown:
+                total += w.sizeHint().width()
+            total += 6 * max(0, len(shown) - 1) + 4
+            widest = max(widest, total)
+        top = self.panel.layout().itemAt(0).layout().sizeHint().width()
+        self.panel.setFixedWidth(max(widest, top) + 12)
+        # And one height: the properties row is always shown with the bar.
+        was_hidden = self.props_bar.isHidden()
+        self.props_bar.setVisible(True)
+        self.panel.setFixedHeight(self.panel.layout().sizeHint().height())
+        self.props_bar.setVisible(not was_hidden)
+
+    def _return_focus(self):
+        self.setFocus()
+
+    def _props_context(self):
+        if self._text_edit is not None or self.mode == "text":
+            return "text"
+        if self.mode == "select":
+            s = self.selection
+            if s is None:
+                return "select_none"
+            return "select_text" if s.shape == "text" else "select_shape"
+        if self.mode in SHAPES:
+            return "shape"
+        return self.mode
+
+    def _update_preset_chip(self):
+        key = self.brush_preset
+        dpr = max(1.0, float(self.devicePixelRatioF()))
+        self.preset_btn.setIcon(QIcon(brush_preview.preview(key, self.color, 44, 18, dpr, size=5.0)))
+        self.preset_btn.setText(self._preset_label(key))
+
+    def _sync_text_bar(self):
+        """Show the properties for the current tool or selection, and none
+        while the toolbar is hidden on purpose (Tab, screenshots,
+        pass-through)."""
+        bar = getattr(self, "props_bar", None)
+        if bar is None or not hasattr(self, "_props_sections"):
+            return
+        panel_off = self.panel.isHidden() and self.panel.testAttribute(Qt.WidgetAttribute.WA_WState_ExplicitShowHide)
+        ctx = self._props_context()
+        wanted = set() if panel_off else set(self._PROPS.get(ctx, ()))
+        for name, w in self._props_sections.items():
+            w.setVisible(name in wanted)
+        if wanted:
+            self._update_preset_chip()
+            for style, b in self.eraser_style_btns.items():
+                b.setChecked(style == self.eraser_style)
+            for shape, b in self.shape_type_btns.items():
+                b.setChecked(shape == self.mode)
+            self.size_value_label.caption = "Width" if ctx in ("shape", "select_shape") else "Size"
+            self.props_hint.setText(self._HINTS.get(ctx, ""))
+            self._sync_size_slider()
+            self._sync_opacity_slider()
+            self._sync_color_swatch()
+        bar.setVisible(bool(wanted))
+        if hasattr(self, "toast_label"):
+            self._place_chrome()
+
+    # -- More menu and Preferences ----------------------------------------------
+
+    def _menu_popup(self):
+        menu = make_panel(QFrame(None))
+        menu.setObjectName("Toolbar")
+        menu.setStyleSheet(C.TOOLBAR_STYLE + C.FIELD_STYLE + C.MENU_STYLE)
+        v = QVBoxLayout(menu)
+        v.setContentsMargins(6, 6, 6, 6)
+        v.setSpacing(1)
+        return menu, v
+
+    def _menu_item(self, menu, layout, icon_name, text, shortcut, tooltip, slot, checkable=False, close=True):
+        b = MenuRow(menu, icons.build_icon(icon_name) if icon_name else None, text, shortcut)
+        b.setCheckable(checkable)
+        b.setToolTip(tooltip)
+
+        def run(checked=False, slot=slot):
+            if close and menu.isVisible():
+                # Close first: a screenshot or selection must not see the
+                # menu, and the next popup opens from the toolbar.
+                menu.close()
+                QTimer.singleShot(0, slot)
+            else:
+                slot()
+        b.clicked.connect(run)
+        layout.addWidget(b)
+        return b
+
+    @staticmethod
+    def _menu_heading(menu, layout, text, first=False):
+        if not first:
+            rule = QFrame(menu)
+            rule.setObjectName("Rule")
+            rule.setFixedHeight(1)
+            layout.addSpacing(3)
+            layout.addWidget(rule)
+            layout.addSpacing(3)
+        label = QLabel(text, menu)
+        label.setObjectName("MenuHeading")
+        layout.addWidget(label)
+
+    def _build_more_menu(self):
+        """Canvas, export and application commands, menu style: icon, name,
+        shortcut on the right."""
+        menu, v = self._menu_popup()
+        item = lambda *a, **k: self._menu_item(menu, v, *a, **k)  # noqa: E731
+
+        self._menu_heading(menu, v, "CANVAS", first=True)
+        self.capture_menu_btn = item("region", "Capture area", "R", "Select an area to annotate",
+                                     self.begin_region_selection)
+        self.region_btn = item("margin", "Margin and area…", "", "Annotation margin and capture area",
+                               self._show_region_popup, checkable=True)
+        self.backdrop_btn = item(None, "", "", "Backdrop behind your annotations (click to cycle)",
+                                 self._cycle_backdrop, close=False)
+        self.backdrop_btn.setIcon(self._backdrop_icon(self.backdrop))
+        self.backdrop_btn.setText(f"Backdrop: {self._BACKDROP_LABEL[self.backdrop]}")
+        h = QHBoxLayout()
+        h.setContentsMargins(34, 0, 10, 2)
+        h.setSpacing(6)
+        self.backdrop_opacity_slider = QSlider(Qt.Orientation.Horizontal, menu)
+        self.backdrop_opacity_slider.setRange(10, 100)
+        self.backdrop_opacity_slider.setValue(int(self.backdrop_opacity * 100))
+        self.backdrop_opacity_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.backdrop_opacity_slider.setToolTip("Backdrop intensity")
+        self.backdrop_opacity_slider.valueChanged.connect(self._on_backdrop_opacity_slider_changed)
+        h.addWidget(self.backdrop_opacity_slider, 1)
+        self.backdrop_opacity_value_label = QLabel(f"{int(self.backdrop_opacity * 100)}%", menu)
+        self.backdrop_opacity_value_label.setObjectName("SliderValue")
+        h.addWidget(self.backdrop_opacity_value_label)
+        v.addLayout(h)
+        self.fit_btn = item("fit", "Fit capture to screen", "Ctrl+0", "Frame the whole capture", self.frame_capture)
+        self.actual_btn = item("actual", "Actual pixels", "Ctrl+1", "One image pixel per screen pixel",
+                               self.actual_pixels)
+
+        self._menu_heading(menu, v, "EXPORT")
+        self.snap_menu_btn = item("snapshot", "Screenshot", "F9", "Save a screenshot with your annotations",
+                                  self.capture_annotated)
+        self.folder_btn = item("folder", "Screenshots folder", "", "Open the folder screenshots are saved to",
+                               self.open_screenshot_folder)
+
+        self._menu_heading(menu, v, "APPLICATION")
+        self.pass_btn = item("pass_through", "Pass-through", "F8", "Click through to the desktop",
+                             self.toggle_pass_through, checkable=True)
+        self.hide_ui_btn = item("hide_ui", "Hide interface", "Tab", "Hide the toolbar", self.toggle_interface)
+        self.monitor_btn = item("monitor", "Next monitor", "F7", "Move to the next monitor", self.move_to_next_screen)
+        self.prefs_btn = item("settings", "Preferences…", "", "Pen pressure, stabilizer, startup",
+                              self._show_prefs)
+        self.exit_btn = item("exit", "Exit", "Esc", "Exit (Esc)", self.dismiss)
+        menu.setFixedWidth(250)
+        return menu
+
+    def _build_prefs(self):
+        """Persistent preferences: how the pen feels and how the app starts."""
+        pop, v = self._menu_popup()
+        v.setContentsMargins(10, 10, 10, 10)
+        v.setSpacing(6)
+        self._menu_heading(pop, v, "PRESSURE RESPONSE", first=True)
+        r = QHBoxLayout()
+        r.setSpacing(2)
+        self.pressure_buttons = {}
+        for name, tip in (("soft", "Full strength with a light touch"), ("normal", "Linear"),
+                          ("firm", "Needs more force for full strength")):
+            b = QToolButton(pop)
+            b.setObjectName("Seg")
+            b.setText(name.capitalize())
+            b.setCheckable(True)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.setToolTip(f"Pen pressure response: {tip}")
+            b.clicked.connect(lambda checked=False, n=name: (self._set_pressure_curve(n), self._sync_prefs()))
+            r.addWidget(b)
+            self.pressure_buttons[name] = b
+        r.addStretch(1)
+        v.addLayout(r)
+        self._menu_heading(pop, v, "BRUSH CURSOR")
+        r = QHBoxLayout()
+        r.setSpacing(2)
+        self.cursor_buttons = {}
+        for name, tip in (("outline", "A circle the size of the brush"), ("crosshair", "A small crosshair"),
+                          ("hidden", "No brush cursor")):
+            b = QToolButton(pop)
+            b.setObjectName("Seg")
+            b.setText(name.capitalize())
+            b.setCheckable(True)
+            b.setChecked(name == self.brush_cursor)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda checked=False, n=name: self._set_brush_cursor(n))
+            r.addWidget(b)
+            self.cursor_buttons[name] = b
+        r.addStretch(1)
+        v.addLayout(r)
+        self._menu_heading(pop, v, "STABILIZER")
+        r = QHBoxLayout()
+        self.smoothing_slider = QSlider(Qt.Orientation.Horizontal, pop)
+        self.smoothing_slider.setRange(0, 90)
+        self.smoothing_slider.setValue(int(self.smoothing * 100))
+        self.smoothing_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.smoothing_slider.setToolTip("Steadier lines that trail the pen (all brushes)")
+        self.smoothing_slider.valueChanged.connect(self._on_smoothing_slider_changed)
+        r.addWidget(self.smoothing_slider, 1)
+        self.smoothing_value_label = QLabel(f"{int(self.smoothing * 100)}%", pop)
+        self.smoothing_value_label.setObjectName("SliderValue")
+        r.addWidget(self.smoothing_value_label)
+        v.addLayout(r)
+        self._menu_heading(pop, v, "DIAGNOSTICS")
+        self.diag_btn = MenuRow(pop, None, "Show input diagnostic", "Ctrl+Shift+I")
+        self.diag_btn.setCheckable(True)
+        self.diag_btn.setToolTip("Raw and processed pen pressure, tilt, device and brush diameter")
+        self.diag_btn.clicked.connect(lambda checked: self.toggle_input_diag())
+        v.addWidget(self.diag_btn)
+        self.startup_heading = QWidget(pop)
+        sh = QVBoxLayout(self.startup_heading)
+        sh.setContentsMargins(0, 0, 0, 0)
+        self._menu_heading(self.startup_heading, sh, "STARTUP")
+        v.addWidget(self.startup_heading)
+        self.autostart_btn = MenuRow(pop, None, "Start with Windows", "")
+        self.autostart_btn.setCheckable(True)
+        self.autostart_btn.setToolTip("Start Crit Overlay when you sign in")
+        self.autostart_btn.clicked.connect(lambda checked: self.autostart_toggled.emit(checked))
+        v.addWidget(self.autostart_btn)
+        self.autostart_btn.hide()  # until app.py says autostart is available
+        self.startup_heading.hide()
+        pop.setFixedWidth(250)
+        return pop
+
+    def _sync_prefs(self):
+        for name, b in self.pressure_buttons.items():
+            b.setChecked(name == self.pressure_curve)
+
+    def _show_prefs(self):
+        self._sync_prefs()
+        place_popup(self.prefs_popup, self.more_btn, align="right")
+
+    def _show_more_menu(self):
+        # Esc discards a capture rather than hiding, so only show it as
+        # the shortcut when it really does what the item says.
+        self.exit_btn.set_shortcut("" if self.capture is not None else "Esc")
+        for b in (self.fit_btn, self.actual_btn):
+            b.setEnabled(self.capture is not None)
+        self.pass_btn.setChecked(self.pass_through)
+        self._refresh_region_button()
+        place_popup(self.more_menu, self.more_btn, align="right")
+
+    def set_autostart_checked(self, checked):
+        """Called by app.py: offer Start with Windows in Preferences with its
+        current state."""
+        self.startup_heading.show()
+        self.autostart_btn.show()
+        self.autostart_btn.setChecked(bool(checked))
+
+    def open_screenshot_folder(self):
+        folder = self._last_good_screenshot_dir or paths.current().screenshot_dir_candidates(
+            self._screenshot_dir_override)[0]
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(folder))  # noqa: S606 - user action, our own folder
+        except Exception:
+            logger.warning("Couldn't open %s", folder, exc_info=True)
+            self.status_changed.emit(f"Couldn't open {folder}")
+
+    def toggle_interface(self):
+        """Tab: hide or show the toolbar. Drawing and every shortcut keep
+        working while hidden."""
+        if self.pass_through or self.capture_pending():
+            return
+        self._ui_hidden = not self._ui_hidden
+        self.hover_tip.hide()
+        self.panel.setVisible(not self._ui_hidden)
+        self._sync_text_bar()
+        if self._ui_hidden:
+            self.status_changed.emit("Interface hidden. Tab shows it")
+
+    def capture_pending(self):
+        return self._grabbing or self._capturing
+
+    def _text_style_changed(self, what=None):
+        te = self._text_edit
+        style = TextStyle(self.text_family, self.text_bold, self.text_align)
+        size = self.text_size / self._view_scale()
+        if te is not None:
+            te.font = style
+            te.size = size
+            self.setFocus()
+            self.update()
+        elif self.selection is not None and self.selection.shape == "text" and what is not None:
+            def apply(s):
+                if what == "size":
+                    s.size = size
+                else:
+                    s.font = style
+            self._modify_selection(apply, merge_key="text_" + what)
+        self._save_settings()
+
+    def _set_text_family(self, family):
+        self.text_family = family
+        self._text_style_changed("family")
+
+    def _set_text_size(self, value):
+        self.text_size = int(value)
+        self._sync_text_size_widgets()
+        self._text_style_changed("size")
+
+    def _sync_text_size_widgets(self):
+        for widget in (self.text_size_slider, self.text_size_label):
+            widget.blockSignals(True)
+            widget.setValue(self.text_size)
+            widget.blockSignals(False)
+
+    def _set_text_bold(self, bold):
+        self.text_bold = bool(bold)
+        self.bold_btn.setChecked(self.text_bold)
+        self._text_style_changed("bold")
+
+    def _set_text_align(self, align):
+        self.text_align = align
+        for a, btn in self.align_btns.items():
+            btn.setChecked(a == align)
+        self._text_style_changed("align")
+
+    # -- text editing -------------------------------------------------------
+
+    def _in_drawable(self, pos):
+        if self.capture is not None:
+            return self._doc_outer().contains(QPointF(pos))
+        return self.region is None or self.drawable_rect().contains(QPointF(pos).toPoint())
+
+    def _begin_text(self, stroke, original=None, caret_at=None):
+        """Start typing into `stroke`. With `original`, it is a copy of that
+        committed annotation, which is hidden from the canvas meanwhile."""
+        self._text_edit = stroke
+        self._editor = TextEditor(stroke)
+        self._text_original = original
+        if original is not None:
+            self._hidden_stroke = original
+            self._rebuild_canvas()
+            if caret_at is not None:
+                self._editor.place(caret_at)
+        self.history.redo_stack.clear()
+        self._refresh_history_buttons()
+        self.activateWindow()
+        self.setFocus()
+        self.update()
+
+    def _end_text_edit(self):
+        te, original = self._text_edit, self._text_original
+        self._text_edit = self._editor = self._text_original = None
+        self._text_dragging = False
+        if self._hidden_stroke is not None:
+            self._hidden_stroke = None
+            self._rebuild_canvas()
+        return te, original
+
+    def _commit_text(self):
+        if self._text_edit is None:
+            return
+        te, original = self._end_text_edit()
+        keep = bool(te.text.strip())
+        if original is not None:
+            if keep:
+                self.history.replace(original, te)
+            else:
+                self.history.change([original], [])
+            self._rebuild_canvas()
+            self.selection = te if keep and self.mode == "select" else None
+        elif keep:
+            self.history.commit(te)
+            self._commit_stroke_to_canvas(te)
+        self._refresh_history_buttons()
+        self._sync_text_bar()
+        self.update()
+
+    def _cancel_text(self):
+        if self._text_edit is not None:
+            self._end_text_edit()
+            self.update()
+
+    def _annotation_press(self, pos, modifiers=Qt.KeyboardModifier.NoModifier):
+        """A press in stroke coordinates for the text and select tools.
+        Returns True if handled (the press must not start a stroke)."""
+        te = self._text_edit
+        if te is not None:
+            if brush.text_rect(te).adjusted(-8, -8, 8, 8).contains(pos):
+                self._editor.place(pos, extend=bool(modifiers & Qt.KeyboardModifier.ShiftModifier))
+                self._text_dragging = True
+                self.update()
+                return True
+            self._commit_text()
+            if self.mode != "select":
+                return True  # a click outside only commits
+        if self.mode == "select":
+            self._select_press(pos)
+            return True
+        if self.mode != "text":
+            return False
+        if self.pass_through or not self._in_drawable(pos):
+            return True
+        stroke = Stroke(self.color, self.text_size / self._view_scale(), self.opacity, shape="text")
+        stroke.font = TextStyle(self.text_family, self.text_bold, self.text_align)
+        stroke.points = [(QPointF(pos), brush.SHAPE_PRESSURE)]
+        self._begin_text(stroke)
+        return True
+
+    def _text_key(self, event):
+        ed = self._editor
+        key = event.key()
+        mods = event.modifiers()
+        ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+        shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+        moves = {
+            Qt.Key.Key_Left: "word_left" if ctrl else "left",
+            Qt.Key.Key_Right: "word_right" if ctrl else "right",
+            Qt.Key.Key_Up: "up",
+            Qt.Key.Key_Down: "down",
+            Qt.Key.Key_Home: "start" if ctrl else "home",
+            Qt.Key.Key_End: "finish" if ctrl else "end",
+        }
+        clipboard = QApplication.clipboard()
+        if key == Qt.Key.Key_Escape:
+            self._cancel_text()
+        elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if ctrl:
+                self._commit_text()
+            else:
+                ed.insert("\n")
+        elif key == Qt.Key.Key_Backspace:
+            ed.backspace()
+        elif key == Qt.Key.Key_Delete:
+            ed.delete()
+        elif key in moves:
+            ed.move(moves[key], extend=shift)
+        elif ctrl and key == Qt.Key.Key_A:
+            ed.select_all()
+        elif ctrl and key in (Qt.Key.Key_C, Qt.Key.Key_X):
+            if ed.has_selection():
+                clipboard.setText(ed.selected_text())
+                if key == Qt.Key.Key_X:
+                    ed.insert("")
+        elif ctrl and key == Qt.Key.Key_V:
+            pasted = clipboard.text().replace("\r\n", "\n").replace("\r", "\n")
+            ed.insert("".join(ch for ch in pasted if ch == "\n" or ch.isprintable()))
+        else:
+            typed = event.text()
+            if typed and typed.isprintable():
+                ed.insert(typed)
+        event.accept()
+        self.update()
+
+    # Keys that keep their shortcut while typing: they commit the text
+    # first (see the methods they call).
+    _TEXT_PASSTHROUGH_KEYS = (Qt.Key.Key_F7, Qt.Key.Key_F8, Qt.Key.Key_F9)
+
+    def event(self, event):
+        # Trackpad pinch zooms a capture around the fingers.
+        if (event.type() == QEvent.Type.NativeGesture and getattr(self, "capture", None) is not None
+                and event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture):
+            self.zoom_at(event.position(), 1.0 + event.value())
+            return True
+        # While typing, claim every key before the application shortcuts
+        # see it, so B, E, [ and the rest type instead of switching tools.
+        if (event.type() == QEvent.Type.ShortcutOverride and getattr(self, "_text_edit", None) is not None
+                and event.key() not in self._TEXT_PASSTHROUGH_KEYS):
+            event.accept()
+            return True
+        return super().event(event)
+
+    def _paint_live_text(self, painter):
+        te = self._text_edit
+        layer = brush.render_shape_layer(te, self._canvas_dpr())
+        painter.save()
+        if layer is not None:
+            pixmap, origin = layer
+            painter.setOpacity(max(0.01, min(1.0, te.opacity)))
+            painter.drawPixmap(origin, pixmap)
+            painter.setOpacity(1.0)
+        frame = QPen(QColor(255, 255, 255, 170), 1, Qt.PenStyle.DashLine)
+        frame.setCosmetic(True)
+        painter.setPen(frame)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        pad = 4 / self._view_scale()
+        painter.drawRect(brush.text_rect(te).adjusted(-pad, -pad, pad, pad))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(77, 171, 247, 90))
+        for rect in self._editor.selection_rects():
+            painter.drawRect(rect)
+        caret = QPen(QColor(te.color), 2)
+        caret.setCosmetic(True)
+        painter.setPen(caret)
+        painter.drawLine(*self._editor.caret_line())
+        painter.restore()
+
+    def _paint_floating(self, painter, stroke):
+        layer = brush.render_shape_layer(stroke, self._canvas_dpr())
+        if layer is None:
+            return
+        pixmap, origin = layer
+        painter.save()
+        painter.setOpacity(max(0.01, min(1.0, stroke.opacity)))
+        painter.drawPixmap(origin, pixmap)
+        painter.restore()
+
+    _HANDLE_PX = 7
+
+    def _paint_selection(self, painter):
+        """Outline and handles, in window coordinates at a fixed on-screen
+        size. Painted on the window only, never into the canvas, and not
+        while capturing, so they never reach a screenshot."""
+        stroke = self._floating or self.selection
+        rect = sel_mod.bounds(stroke)
+        tl, br = self._to_view(rect.topLeft()), self._to_view(rect.bottomRight())
+        view_rect = QRectF(tl, br).normalized().adjusted(-3, -3, 3, 3)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(0, 0, 0, 140), 1))
+        painter.drawRect(view_rect)
+        painter.setPen(QPen(QColor(77, 171, 247, 230), 1, Qt.PenStyle.DashLine))
+        painter.drawRect(view_rect)
+        h = self._HANDLE_PX
+        painter.setPen(QPen(QColor(77, 171, 247), 1))
+        painter.setBrush(QColor(255, 255, 255))
+        for point in sel_mod.handles(stroke).values():
+            v = self._to_view(point)
+            painter.drawRect(QRectF(v.x() - h / 2, v.y() - h / 2, h, h))
+        painter.restore()
+
+    # -- select tool ----------------------------------------------------------
+
+    def _select_tolerance(self):
+        return 6 / self._view_scale()
+
+    def _set_selection(self, stroke):
+        if stroke is self.selection:
+            return
+        self.selection = stroke
+        if stroke is not None and stroke.shape == "text":
+            self._show_text_style(stroke)
+        self._sync_text_bar()
+        self.update()
+
+    def _show_text_style(self, stroke):
+        """Point the text bar at a selected text, without editing it."""
+        self.text_family = stroke.font.family
+        self.text_bold = stroke.font.bold
+        self.text_align = stroke.font.align
+        self.text_size = int(max(C.MIN_TEXT_SIZE, min(C.MAX_TEXT_SIZE, round(stroke.size * self._view_scale()))))
+        for widget in (self.font_combo, self.text_size_slider, self.text_size_label, self.bold_btn,
+                       *self.align_btns.values()):
+            widget.blockSignals(True)
+        self.font_combo.setCurrentText(self.text_family)
+        self.text_size_slider.setValue(self.text_size)
+        self.text_size_label.setValue(self.text_size)
+        self.bold_btn.setChecked(self.text_bold)
+        for a, btn in self.align_btns.items():
+            btn.setChecked(a == self.text_align)
+        for widget in (self.font_combo, self.text_size_slider, self.text_size_label, self.bold_btn,
+                       *self.align_btns.values()):
+            widget.blockSignals(False)
+
+    def _modify_selection(self, fn, merge_key=None):
+        old = self.selection
+        new = old.copy()
+        fn(new)
+        self._replace_selection(new, merge_key)
+
+    def _replace_selection(self, new, merge_key=None):
+        self.history.replace(self.selection, new, merge_key)
+        self.selection = new
+        self._rebuild_canvas()
+        self._refresh_history_buttons()
+        self.update()
+
+    def _select_press(self, pos):
+        now = time.monotonic()
+        last_time, last_hit = self._last_select_press
+        tol = self._select_tolerance()
+        if self.selection is not None:
+            handle = sel_mod.handle_at(self.selection, pos, tol)
+            if handle is not None:
+                self._drag = {"kind": "resize", "handle": handle, "start": QPointF(pos),
+                              "orig": self.selection, "moved": False}
+                return
+        hit = sel_mod.topmost_hit(self.history, pos, tol)
+        self._last_select_press = (now, hit)
+        self._set_selection(hit)
+        if hit is None:
+            return
+        double = hit is last_hit and now - last_time < QApplication.doubleClickInterval() / 1000.0
+        if double and hit.shape == "text":
+            self._last_select_press = (0.0, None)
+            self._begin_text(sel_mod.absorb(self.history, hit), original=hit, caret_at=pos)
+            return
+        self._drag = {"kind": "move", "handle": None, "start": QPointF(pos), "orig": hit, "moved": False}
+
+    def _annotation_move(self, pos):
+        if self._text_dragging and self._editor is not None:
+            self._editor.place(pos, extend=True)
+            self.update()
+            return
+        drag = self._drag
+        if drag is None:
+            return
+        drag["pos"] = QPointF(pos)
+        dx, dy = pos.x() - drag["start"].x(), pos.y() - drag["start"].y()
+        if not drag["moved"]:
+            if max(abs(dx), abs(dy)) * self._view_scale() < 3:
+                return
+            drag["moved"] = True
+            drag["src"] = sel_mod.absorb(self.history, drag["orig"])
+            self._hidden_stroke = drag["orig"]
+            self._rebuild_canvas()
+        if drag["kind"] == "move":
+            self._floating = sel_mod.translated(drag["src"], dx, dy)
+        else:
+            shift = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+            self._floating = sel_mod.resized(drag["src"], drag["handle"], pos, constrain=shift)
+        self.update()
+
+    def _annotation_release(self):
+        self._text_dragging = False
+        drag, self._drag = self._drag, None
+        if drag is None or not drag["moved"]:
+            return
+        floating, self._floating = self._floating, None
+        self._hidden_stroke = None
+        if floating is not None:
+            self._replace_selection(floating)
+        else:
+            self._rebuild_canvas()
+            self.update()
+
+    def _offset_copy(self, stroke):
+        self._paste_count += 1
+        step = 16 * self._paste_count / self._view_scale()
+        return sel_mod.translated(stroke, step, step)
+
+    def _add_annotation(self, stroke):
+        self.history.commit(stroke)
+        self._commit_stroke_to_canvas(stroke)
+        if self.mode != "select":
+            self._set_mode("select")
+        self._set_selection(stroke)
+        self._refresh_history_buttons()
+        self.update()
+
+    _MIME = "application/x-crit-overlay-annotation"
+
+    def copy_selection(self):
+        if self.selection is None:
+            return
+        self._annotation_clipboard = sel_mod.absorb(self.history, self.selection)
+        self._paste_count = 0
+        mime = QMimeData()
+        mime.setData(self._MIME, b"1")
+        if self.selection.shape == "text":
+            mime.setText(self.selection.text)
+        QApplication.clipboard().setMimeData(mime)
+
+    def cut_selection(self):
+        if self.selection is not None:
+            self.copy_selection()
+            self.delete_selection()
+
+    def paste(self):
+        """Annotations copied here paste as annotations; any other text on
+        the Windows clipboard becomes a new text annotation at the cursor."""
+        if self._text_edit is not None:
+            return
+        mime = QApplication.clipboard().mimeData()
+        if mime is not None and mime.hasFormat(self._MIME) and self._annotation_clipboard is not None:
+            self._add_annotation(self._offset_copy(self._annotation_clipboard))
+            return
+        text = QApplication.clipboard().text().replace("\r\n", "\n").replace("\r", "\n")
+        text = "".join(ch for ch in text if ch == "\n" or ch.isprintable()).strip("\n")
+        if not text.strip():
+            return
+        pos = self.cursor_pos or self._to_doc(QPointF(self.width() / 2, self.height() / 2))
+        stroke = Stroke(self.color, self.text_size / self._view_scale(), self.opacity, shape="text")
+        stroke.font = TextStyle(self.text_family, self.text_bold, self.text_align)
+        stroke.points = [(QPointF(pos), brush.SHAPE_PRESSURE)]
+        stroke.text = text
+        self._add_annotation(stroke)
+
+    def duplicate_selection(self):
+        if self.selection is not None:
+            self._paste_count = 0
+            self._add_annotation(self._offset_copy(sel_mod.absorb(self.history, self.selection)))
+
+    def delete_selection(self):
+        if self.selection is None or self._drag is not None:
+            return
+        self.history.change([self.selection], [])
+        self.selection = None
+        self._rebuild_canvas()
+        self._refresh_history_buttons()
+        self._sync_text_bar()
+        self.update()
+
+    def _nudge(self, key, big):
+        step = (10 if big else 1) / self._view_scale()
+        dx, dy = {Qt.Key.Key_Left: (-step, 0), Qt.Key.Key_Right: (step, 0),
+                  Qt.Key.Key_Up: (0, -step), Qt.Key.Key_Down: (0, step)}[key]
+        moved = sel_mod.translated(sel_mod.absorb(self.history, self.selection), dx, dy)
+        self._replace_selection(moved, merge_key="nudge")
 
     def _install_shortcuts(self):
         def add(seq, fn):
@@ -682,6 +1673,21 @@ class Overlay(QWidget):
         add("B", lambda: self._set_mode("brush"))
         add("E", lambda: self._set_mode("eraser"))
         add("I", self._toggle_eyedropper)
+        add("U", self._cycle_shape)
+        add("T", lambda: self._set_mode("text"))
+        add("V", lambda: self._set_mode("select"))
+        add("Ctrl+C", self.copy_selection)
+        add("Ctrl+X", self.cut_selection)
+        add("Ctrl+V", self.paste)
+        add("Ctrl+D", self.duplicate_selection)
+        add("Delete", self.delete_selection)
+        add("Tab", self.toggle_interface)
+        add("Ctrl+Shift+I", self.toggle_input_diag)
+        add("Ctrl+0", self.frame_capture)
+        add("Ctrl+1", self.actual_pixels)
+        add("Ctrl+=", lambda: self.zoom_by(1.25))
+        add("Ctrl++", lambda: self.zoom_by(1.25))
+        add("Ctrl+-", lambda: self.zoom_by(0.8))
         add("Ctrl+Z", self.undo)
         add("Ctrl+Shift+Z", self.redo)
         add("F7", self.move_to_next_screen)
@@ -726,6 +1732,20 @@ class Overlay(QWidget):
             margin_size=self.margin_size,
             margin_color=self.margin_color,
             margin_opacity=self.margin_opacity,
+            text_family=self.text_family,
+            text_size=self.text_size,
+            text_bold=self.text_bold,
+            text_align=self.text_align,
+            eraser_size=self.eraser_size,
+            brush_preset=self.brush_preset,
+            brush_pressure=self.brush_pressure,
+            pressure_curve=self.pressure_curve,
+            eraser_style=self.eraser_style,
+            eraser_opacity=self.eraser_opacity,
+            recent_colors=self.recent_colors,
+            favorite_colors=self.favorite_colors,
+            toolbar_positions=self._toolbar_positions,
+            brush_cursor=self.brush_cursor,
         )
 
     # State setters. Every mutable tool property goes through one of these,
@@ -733,11 +1753,128 @@ class Overlay(QWidget):
     # hotkey and a toolbar control can't disagree about what's selected.
 
     def _set_mode(self, mode):
+        if mode != "text":
+            self._commit_text()
+        if mode != "select":
+            self._set_selection(None)
         self.mode = mode
+        self.text_btn.setChecked(mode == "text")
+        self.select_btn.setChecked(mode == "select")
+        if mode == "text":
+            self.setCursor(Qt.CursorShape.IBeamCursor)
+        elif mode == "select":
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+        elif not self._wants_pan() and not self._selecting:
+            self.unsetCursor()
+        self._sync_text_bar()
         self.brush_btn.setChecked(mode == "brush")
         self.eraser_btn.setChecked(mode == "eraser")
         self.eyedropper_btn.setChecked(mode == "eyedropper")
+        if mode in SHAPES and mode != self._last_shape:
+            self._last_shape = mode
+            self.shape_btn.setIcon(icons.build_icon(mode))
+        self.shape_btn.setChecked(mode in SHAPES)
+        if getattr(self, "size_slider", None) is not None:
+            self._sync_size_slider()
         self.update()
+
+    def _on_brush_button(self):
+        was_brush = self.mode == "brush"
+        self._set_mode("brush")
+        if was_brush:
+            self._show_brush_popup(self.brush_btn)
+
+    def _show_brush_popup(self, anchor):
+        if self._brush_popup is None:
+            self._brush_popup = BrushPopup(self)
+        self._brush_popup.show_below(anchor)
+
+    def _on_eraser_button(self):
+        was_eraser = self.mode == "eraser"
+        self._set_mode("eraser")
+        if was_eraser:
+            if self._eraser_popup is None:
+                from .brush_popup import EraserPopup
+                self._eraser_popup = EraserPopup(self)
+            self._eraser_popup.show_below(self.eraser_btn)
+
+    def _set_eraser_style(self, style):
+        if style not in C.ERASER_STYLES:
+            return
+        self.eraser_style = style
+        self.status_changed.emit("Soft eraser" if style == "soft" else "Hard eraser")
+        self._sync_text_bar()
+        self._show_size_preview()
+        self._save_settings()
+
+    def _set_pressure_curve(self, name):
+        if name in C.PRESSURE_CURVES:
+            self.pressure_curve = name
+            self.status_changed.emit(f"Pressure: {name}")
+            self._save_settings()
+
+    def _curved(self, pressure):
+        return max(0.0, min(1.0, pressure)) ** C.PRESSURE_CURVES.get(self.pressure_curve, 1.0)
+
+    def _preset_label(self, key):
+        return brushes.LABELS.get(key, key)
+
+    def _set_brush_preset(self, key):
+        if key not in brushes.PRESETS:
+            return
+        self.brush_preset = key
+        if self.mode != "brush":
+            self._set_mode("brush")
+        self.status_changed.emit(self._preset_label(key))
+        self._show_size_preview()
+        self._sync_text_bar()
+        self._save_settings()
+
+    def pressure_flags(self, key=None):
+        """(pressure drives size, pressure drives opacity) for a preset."""
+        key = key or self.brush_preset
+        p = brushes.PRESETS[key]
+        return self.brush_pressure.get(key, (p.size_pressure, p.opacity_pressure))
+
+    def set_brush_pressure(self, size=None, opacity=None):
+        """Turn pressure-driven size or opacity on or off for the current
+        brush (each brush remembers its own)."""
+        s, o = self.pressure_flags()
+        self.brush_pressure[self.brush_preset] = (s if size is None else bool(size),
+                                                  o if opacity is None else bool(opacity))
+        self._save_settings()
+
+    def _stroke_spec(self, eraser):
+        if eraser:
+            return brushes.spec_for(brushes.ERASERS[self.eraser_style])
+        size_p, opacity_p = self.pressure_flags()
+        return brushes.spec_for(brushes.PRESETS[self.brush_preset], size_p, opacity_p)
+
+    def _show_size_preview(self):
+        """Show the brush at its real size and softness for a moment, at
+        the last canvas position (or the center), while size or tuning
+        changes."""
+        self._size_preview_until = time.monotonic() + 0.9
+        QTimer.singleShot(950, self.update)
+        self.update()
+
+    def _on_shape_button(self):
+        # clicked fires after the checkable button toggles itself, so read
+        # the mode rather than the button state.
+        was_shape = self.mode in SHAPES
+        self._set_mode(self._last_shape)
+        if was_shape:
+            if self._shape_popup is None:
+                self._shape_popup = ShapePopup(self)
+            self._shape_popup.show_below(self.shape_btn)
+
+    def _cycle_shape(self):
+        if self.mode in SHAPES:
+            nxt = SHAPES[(SHAPES.index(self.mode) + 1) % len(SHAPES)]
+        else:
+            nxt = self._last_shape
+        self._set_mode(nxt)
+        self.status_changed.emit(SHAPE_LABELS[nxt])
 
     def _toggle_eyedropper(self):
         if self.mode == "eyedropper":
@@ -770,28 +1907,80 @@ class Overlay(QWidget):
         if self.mode == "eyedropper":
             self._set_mode(self._pre_eyedropper_mode)
 
+    def _selected_shape(self):
+        s = self.selection if self.mode == "select" else None
+        return s if s is not None and s.shape not in (None, "text") else None
+
+    def _active_size(self):
+        if self.mode == "eraser":
+            return self.eraser_size
+        shape = self._selected_shape()
+        if shape is not None:
+            return round(max(C.MIN_SIZE, min(C.MAX_SIZE, shape.size * self._view_scale())), 2)
+        return self.brush_size
+
+    def _sync_size_slider(self):
+        value = self._active_size()
+        for widget, v in ((self.size_slider, brushes.size_to_slider(value)), (self.size_value_label, value)):
+            widget.blockSignals(True)
+            widget.setValue(v)
+            widget.blockSignals(False)
+
+    def _active_opacity(self):
+        if self.mode == "eraser":
+            return self.eraser_opacity
+        if self.mode == "select" and self.selection is not None:
+            return self.selection.opacity
+        return self.opacity
+
+    def _sync_opacity_slider(self):
+        percent = int(round(self._active_opacity() * 100))
+        for widget in (self.opacity_slider, self.opacity_value_label):
+            widget.blockSignals(True)
+            widget.setValue(percent)
+            widget.blockSignals(False)
+
+    def _sync_color_swatch(self):
+        color = self.selection.color if (self.mode == "select" and self.selection is not None) else self.color
+        self.color_btn.setIcon(swatch_icon(color, 22))
+
     def _set_size(self, value):
-        value = max(C.MIN_SIZE, min(C.MAX_SIZE, int(round(value))))
-        self.brush_size = value
-        self.size_slider.blockSignals(True)
-        self.size_slider.setValue(value)
-        self.size_slider.blockSignals(False)
-        self.size_value_label.setText(f"{value}px")
+        value = round(max(C.MIN_SIZE, min(C.MAX_SIZE, float(value))), 2)
+        if self.mode == "eraser":
+            self.eraser_size = value
+        else:
+            self.brush_size = value
+        if self.mode in ("brush", "eraser"):
+            self._show_size_preview()
+        if self.selection is not None and self.selection.shape != "text":
+            size = value / self._view_scale()
+            self._modify_selection(lambda s: setattr(s, "size", size), merge_key="size")
+        self._sync_size_slider()
         self._save_settings()
 
     def _on_size_slider_changed(self, v):
-        self._set_size(v)
+        self._set_size(brushes.slider_to_size(v))
 
     def change_size(self, delta):
-        self._set_size(self.brush_size + delta)
+        self._set_size(brushes.step_size(self._active_size(), delta))
 
     def _set_opacity(self, percent):
         percent = max(5, min(100, int(round(percent))))
+        if self.mode == "eraser":
+            self.eraser_opacity = percent / 100.0
+            self._sync_opacity_slider()
+            self._save_settings()
+            return
         self.opacity = percent / 100.0
-        self.opacity_slider.blockSignals(True)
-        self.opacity_slider.setValue(percent)
-        self.opacity_slider.blockSignals(False)
-        self.opacity_value_label.setText(f"{percent}%")
+        self._sync_opacity_slider()
+        if self._text_edit is not None:
+            self._text_edit.opacity = self.opacity
+            self.setFocus()
+            self.update()
+        elif self.selection is not None:
+            opacity = self.opacity
+            self._modify_selection(lambda s: setattr(s, "opacity", opacity), merge_key="opacity")
+            self._sync_opacity_slider()
         self._save_settings()
 
     def _on_opacity_slider_changed(self, v):
@@ -809,11 +1998,37 @@ class Overlay(QWidget):
     def _on_smoothing_slider_changed(self, v):
         self._set_smoothing(v)
 
-    def _set_color(self, color):
+    def _set_color(self, color, remember=True):
         self.color = QColor(color)
-        self.color_btn.setIcon(icons.build_color_swatch_icon(self.color.name()))
+        if remember:
+            self._remember_color(self.color)
+        self._sync_color_swatch()
+        if hasattr(self, "preset_btn"):
+            self._update_preset_chip()
+        if self._text_edit is not None:
+            self._text_edit.color = QColor(self.color)
+            self.setFocus()
+        elif self.selection is not None:
+            color = QColor(self.color)
+            self._modify_selection(lambda s: setattr(s, "color", QColor(color)), merge_key="color")
         self._save_settings()
         self.update()
+
+    def _remember_color(self, color):
+        name = QColor(color).name()
+        recent = [c for c in self.recent_colors if c != name]
+        self.recent_colors = [name] + recent[:C.RECENT_COLORS - 1]
+
+    def add_favorite_color(self, color):
+        name = QColor(color).name()
+        if name not in self.favorite_colors:
+            self.favorite_colors = (self.favorite_colors + [name])[-C.FAVORITE_COLORS:]
+            self._save_settings()
+
+    def remove_favorite_color(self, color):
+        name = QColor(color).name()
+        self.favorite_colors = [c for c in self.favorite_colors if c != name]
+        self._save_settings()
 
     def pick_color(self):
         c = QColorDialog.getColor(self.color, self, "Brush Color")
@@ -836,6 +2051,7 @@ class Overlay(QWidget):
     def _set_backdrop(self, value):
         self.backdrop = value
         self.backdrop_btn.setIcon(self._backdrop_icon(value))
+        self.backdrop_btn.setText(f"Backdrop: {self._BACKDROP_LABEL[value]}")
         self.backdrop_btn.setToolTip(f"Backdrop: {self._BACKDROP_LABEL[value]} (click to cycle)")
         self._save_settings()
         # The backdrop is its own layer, painted underneath the canvas on
@@ -909,18 +2125,21 @@ class Overlay(QWidget):
         self.update()
 
     def begin_region_selection(self):
+        self._commit_text()
         if self.pass_through or self._grabbing or self._selecting:
             return
         if self.current is not None:
             self._end_stroke()
-        # Selecting again replaces the capture, like a new snip.
+        # Selecting again replaces the capture, like a new snip, once the new
+        # area is actually captured. Until then the old capture and its
+        # history are kept aside, so Esc can return to them.
         if self.capture is not None:
-            self.end_capture()
+            self._stash_session()
         self._selecting = True
         self._selection_anchor = None
         self._selection_point = None
         self.setCursor(Qt.CursorShape.CrossCursor)
-        self.status_changed.emit("Drag to capture an area. Click to draw on the full monitor, Esc to hide")
+        self.status_changed.emit("Drag to capture an area. Click to draw on the full monitor, Esc to go back")
 
     def _finish_region_selection(self, end_pos):
         anchor = self._selection_anchor
@@ -931,6 +2150,7 @@ class Overlay(QWidget):
         if region_mod.is_usable(rect):
             self._start_capture(rect)
         else:
+            self._stashed_session = None  # a deliberate click: full-monitor drawing
             self.set_region(None)
             self.status_changed.emit("Drawing on the full monitor. R to capture an area")
 
@@ -998,6 +2218,7 @@ class Overlay(QWidget):
             if panel_vis and not self.pass_through:
                 self.panel.show()
             self.update()
+            self.claim_foreground("new capture")
         if grab is None or grab.isNull():
             self.begin_region_selection()
             # After the selection prompt, so it isn't replaced by it.
@@ -1005,7 +2226,40 @@ class Overlay(QWidget):
             return
         self._enter_capture(capture_mod.Capture(grab, rect))
 
+    def _stash_session(self):
+        self._cancel_text()
+        if self.current is not None:
+            self._end_stroke()
+        self._set_selection(None)
+        self._stashed_session = (self.capture, self.history)
+        self.history = History(C.MAX_STROKE_HISTORY)
+        self.capture = None
+        self._live_layer = None
+        self._panning = None
+        self.cursor_pos = None
+        self.lazy_pos = None
+        self._rebuild_canvas()
+        self._refresh_history_buttons()
+        self._refresh_region_button()
+        self.update()
+
+    def _restore_stashed_session(self):
+        """Back to the capture and history that were set aside when a new
+        selection started. Returns True if there was one."""
+        if self._stashed_session is None:
+            return False
+        self.capture, self.history = self._stashed_session
+        self._stashed_session = None
+        self.region = None
+        self._rebuild_canvas()
+        self._refresh_history_buttons()
+        self._refresh_region_button()
+        self._sync_region_popup()
+        self.update()
+        return True
+
     def _enter_capture(self, cap):
+        self._stashed_session = None
         if self.current is not None:
             self._end_stroke()
         self.region = None
@@ -1023,10 +2277,11 @@ class Overlay(QWidget):
         s = cap.size()
         logger.info("Captured %dx%d at %gx from %s", round(s.width()), round(s.height()), cap.dpr,
                     f"{cap.source_rect.x()},{cap.source_rect.y()}")
-        self.status_changed.emit("Space+drag moves it. F9 saves, Esc captures again")
+        self.status_changed.emit("Space+drag moves it. F9 saves, R captures again, Esc hides")
 
     def end_capture(self):
         """Discard the capture and its strokes."""
+        self._cancel_text()
         if self.capture is None:
             return
         self.current = None
@@ -1062,6 +2317,7 @@ class Overlay(QWidget):
             self.unsetCursor()
 
     def focusOutEvent(self, event):
+        self.focusOutEvent_reset_temporary()
         # Space released after Alt+Tab never reaches us; without this every
         # click would keep panning.
         if self._space_held or self._panning is not None:
@@ -1096,6 +2352,22 @@ class Overlay(QWidget):
         return self.capture is not None and (self._space_held or self._panning is not None)
 
     def keyPressEvent(self, event):
+        if self._text_edit is not None:
+            self._text_key(event)
+            return
+        if (self.selection is not None and self._drag is None and event.key() in
+                (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down)):
+            self._nudge(event.key(), bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier))
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_Shift:
+            self._shift_changed()
+        if event.key() == Qt.Key.Key_Alt and not event.isAutoRepeat():
+            self._set_alt_pick(True)
+        if event.key() == Qt.Key.Key_H and not event.modifiers() and not event.isAutoRepeat():
+            self._set_peek(True)
+            event.accept()
+            return
         if event.key() == Qt.Key.Key_Space:
             if not event.isAutoRepeat() and self.capture is not None and not self._selecting:
                 self._space_held = True
@@ -1105,7 +2377,24 @@ class Overlay(QWidget):
             return
         super().keyPressEvent(event)
 
+    def _shift_changed(self):
+        """Shift went down or up: re-apply or drop the constraint on a shape
+        being drawn or a handle being dragged, without waiting for a move."""
+        if self.current is not None and self.current.shape is not None:
+            self._update_shape_end()
+        drag = self._drag
+        if drag is not None and drag["kind"] == "resize" and drag["moved"] and "pos" in drag:
+            self._annotation_move(drag["pos"])
+
     def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key.Key_Shift:
+            self._shift_changed()
+        if event.key() == Qt.Key.Key_Alt and not event.isAutoRepeat():
+            self._set_alt_pick(False)
+        if event.key() == Qt.Key.Key_H and not event.isAutoRepeat():
+            self._set_peek(False)
+            event.accept()
+            return
         if event.key() == Qt.Key.Key_Space:
             if not event.isAutoRepeat():
                 self._space_held = False
@@ -1122,19 +2411,188 @@ class Overlay(QWidget):
         self.unsetCursor()
         self.update()
 
+    # -- canvas view: zoom, frame, actual pixels -----------------------------
+    #
+    # Only the view changes (capture.scale and offset). Strokes stay in the
+    # image's own coordinates and the canvas stays at the image's pixel
+    # density, so exports are full resolution at any zoom.
+
+    ZOOM_MIN, ZOOM_MAX = 0.05, 16.0
+
+    def _zoom_anchor(self):
+        p = self.mapFromGlobal(QCursor.pos())
+        return QPointF(p) if self.rect().contains(p) else QPointF(self.width() / 2, self.height() / 2)
+
+    def zoom_percent(self):
+        """Zoom relative to actual pixels (one image pixel per screen pixel)."""
+        if self.capture is None:
+            return 100.0
+        return self.capture.scale * self._window_dpr() / max(1e-6, self.capture.dpr) * 100.0
+
+    def zoom_at(self, view_pos, factor):
+        cap = self.capture
+        if cap is None or self._grabbing or self._capturing:
+            return
+        doc = cap.to_doc(view_pos)
+        scale = max(self.ZOOM_MIN, min(self.ZOOM_MAX, cap.scale * factor))
+        self._set_view(scale, QPointF(view_pos.x() - doc.x() * scale, view_pos.y() - doc.y() * scale))
+
+    def zoom_by(self, factor):
+        self.zoom_at(self._zoom_anchor(), factor)
+
+    def _set_view(self, scale, offset):
+        cap = self.capture
+        if cap is None:
+            return
+        cap.scale = scale
+        cap.offset = offset
+        self._toast(f"{self.zoom_percent():.0f}%", 700)
+        self.update()
+
+    def frame_capture(self):
+        """Ctrl+0: the whole capture centered on the monitor."""
+        if self.capture is None:
+            return
+        self._fit_capture()
+        self._toast(f"Fit: {self.zoom_percent():.0f}%", 700)
+
+    def actual_pixels(self):
+        """Ctrl+1: one image pixel per screen pixel, around the cursor."""
+        cap = self.capture
+        if cap is None:
+            return
+        anchor = self._zoom_anchor()
+        doc = cap.to_doc(anchor)
+        scale = cap.dpr / self._window_dpr()
+        d = self._window_dpr()
+        self._set_view(scale, QPointF(capture_mod.snap(anchor.x() - doc.x() * scale, d),
+                                      capture_mod.snap(anchor.y() - doc.y() * scale, d)))
+
+    def wheelEvent(self, event):
+        # Wheel zooms around the cursor, on a capture (a live screen can't
+        # be zoomed). Trackpad pixel deltas zoom smoothly.
+        pos = self._overlay_pos(event)
+        if self.capture is None or self.pass_through or self._point_over_ui(pos):
+            event.ignore()
+            return
+        dy = event.angleDelta().y()
+        if dy:
+            self.zoom_at(pos, 1.25 ** (dy / 120.0))
+        event.accept()
+
+    # -- on-canvas size and opacity (Alt+right-drag), like Photoshop ------------
+
+    def _adjust_input(self, kind, view_pos):
+        if kind == "press":
+            if self.mode not in ("brush", "eraser") and self.mode not in SHAPES:
+                return
+            self._adjust = {"anchor": QPointF(view_pos), "size": self._active_size(),
+                            "opacity": self._active_opacity()}
+            self._move_cursor(self._to_doc(view_pos))
+            self.setCursor(Qt.CursorShape.BlankCursor)
+            self._show_size_preview()
+        elif kind == "move" and self._adjust is not None:
+            a = self._adjust
+            dx = view_pos.x() - a["anchor"].x()
+            dy = view_pos.y() - a["anchor"].y()
+            # Sideways: size, by ratio (100 px doubles it). Up: more opaque.
+            self._set_size(a["size"] * 2 ** (dx / 100.0))
+            self._set_opacity(a["opacity"] * 100 - dy / 2.0)
+            self._show_size_preview()
+        elif kind == "release":
+            self._adjust = None
+            self.unsetCursor()
+            self._size_preview_until = 0.0
+            self.update()
+
+    def _paint_adjust_hud(self, painter):
+        a = self._adjust
+        painter.save()
+        text = f"{brushes.format_size(self._active_size())}   {int(round(self._active_opacity() * 100))}%"
+        f = QFont("Segoe UI")
+        f.setPixelSize(12)
+        painter.setFont(f)
+        fm = QFontMetricsF(f)
+        w = fm.horizontalAdvance(text) + 16
+        r = QRectF(a["anchor"].x() - w / 2, a["anchor"].y() + self._ring_diameter() / 2 + 10, w, 22)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(20, 20, 23, 225))
+        painter.drawRoundedRect(r, 6, 6)
+        painter.setPen(QColor(C.TEXT))
+        painter.drawText(r, Qt.AlignmentFlag.AlignCenter, text)
+        painter.restore()
+
+    # -- temporary tools ------------------------------------------------------------
+
+    def _set_alt_pick(self, held):
+        """Holding Alt in a drawing tool turns the cursor into a picker:
+        Alt+click samples the screen color and the tool stays."""
+        held = held and self.mode in ("brush", "text") + SHAPES and self._text_edit is None
+        if held == self._alt_pick:
+            return
+        self._alt_pick = held
+        if held:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        elif not self._wants_pan() and not self._selecting:
+            self._set_mode(self.mode)  # restores the tool's own cursor
+        self.update()
+
+    def _set_peek(self, held):
+        """Hold H to see the artwork without annotations (before/after).
+        View only: nothing changes and exports are unaffected."""
+        if held == self._peek:
+            return
+        self._peek = held
+        if held:
+            self._toast("Annotations hidden while H is held", 60000)
+        else:
+            self.toast_label.hide()
+        self.update()
+
+    def focusOutEvent_reset_temporary(self):
+        self._set_peek(False)
+        self._set_alt_pick(False)
+        if self._adjust is not None:
+            self._adjust_input("release", QPointF())
+
     def _escape(self):
-        # With a capture, Esc discards it and goes straight back to
-        # selecting a new area. Otherwise (selecting, or drawing on the
-        # full monitor) it hides the overlay.
+        """Esc backs out of whatever is in progress, one thing at a time,
+        and otherwise hides to the tray. It never discards a capture or
+        switches to full-monitor drawing; those take a deliberate action.
+        (Text editing handles its own Esc: cancel the edit.)"""
         if self._grabbing:
             return
-        if self.capture is not None:
-            self.end_capture()
-            self.begin_region_selection()
+        if close_panels():
+            return  # an open panel (brush picker, menu, colors) closes first
+        if self._adjust is not None:
+            self._adjust_input("release", QPointF())
+            return
+        if self._drag is not None:
+            self._cancel_manipulation()
+            return
+        if self.current is not None and self.current.shape is not None:
+            self.current = None
+            self._live_layer = None
+            self._shape_raw_end = None
+            self.update()
+            return
+        if self.selection is not None:
+            self._set_selection(None)
             return
         if self._selecting:
             self._cancel_selection_state()
+            self._restore_stashed_session()
         self.dismiss()
+
+    def _cancel_manipulation(self):
+        """Put a moved or resized annotation back where it was."""
+        self._drag = None
+        self._floating = None
+        self._text_dragging = False
+        if self._hidden_stroke is not None:
+            self._hidden_stroke = None
+            self._rebuild_canvas()
+        self.update()
 
     def _selection_input(self, kind, pos):
         """Mouse or pen input while selecting an area. kind: press, move,
@@ -1214,7 +2672,7 @@ class Overlay(QWidget):
         self._refresh_region_button()
         if self._region_popup is None:
             self._region_popup = RegionPopup(self)
-        self._region_popup.show_below(self.region_btn)
+        self._region_popup.show_below(self.more_btn)  # the menu closes first
 
     # -- window / mode actions ---------------------------------------------
 
@@ -1225,9 +2683,11 @@ class Overlay(QWidget):
         if self._tray_available:
             shows = f"{hotkey_text} or the tray icon" if hotkey_text else "the tray icon"
             self.exit_btn.setIcon(icons.build_icon("hide"))
+            self.exit_btn.setText("Hide to tray")
             self.exit_btn.setToolTip(f"Hide (Esc). {shows} shows it again")
         else:
             self.exit_btn.setIcon(icons.build_icon("exit"))
+            self.exit_btn.setText("Exit")
             self.exit_btn.setToolTip("Exit (Esc)")
 
     def dismiss(self):
@@ -1243,6 +2703,8 @@ class Overlay(QWidget):
         """Hide everything this window shows, keeping all state: strokes,
         undo history, region, margin, backdrop and pass-through all come
         back as they were. Nothing repaints or polls while hidden."""
+        close_panels()
+        self._commit_text()
         if not self.isVisible():
             return
         if self._selecting:
@@ -1267,10 +2729,31 @@ class Overlay(QWidget):
         QTimer.singleShot(0, native_windows.trim_working_set)
         logger.info("Overlay hidden")
 
+    def claim_foreground(self, reason):
+        """Become the foreground window, and log whether that worked. Tablet
+        drivers choose Windows Ink (pressure) or mouse emulation from the
+        foreground application's settings, so until the overlay is
+        foreground a pen can reach it as a plain mouse: the first strokes
+        after showing it came without pressure until a click activated it."""
+        if not self.isVisible() or self.pass_through:
+            return False
+        self._strokes_to_log = 5
+        if QGuiApplication.platformName() != "windows":
+            return False  # offscreen tests: no real window to bring forward
+        ok = native_windows.claim_foreground(int(self.winId()))
+        if ok:
+            logger.info("Foreground: overlay (%s)", reason)
+        else:
+            _hwnd, _pid, name = native_windows.foreground_info()
+            logger.warning("Foreground: still %s after %s; a pen may draw without pressure until the overlay is "
+                           "clicked", name or "another window", reason)
+        return ok
+
     def show_overlay(self):
         if self.isVisible():
             self.raise_()
             self.activateWindow()
+            self.claim_foreground("show")
             return
         self.show()
         if self.pass_through:
@@ -1281,6 +2764,7 @@ class Overlay(QWidget):
             self.raise_()
             self.activateWindow()
             self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+            self.claim_foreground("show")
         logger.info("Overlay shown")
 
     def toggle_visibility(self):
@@ -1290,6 +2774,7 @@ class Overlay(QWidget):
             self.show_overlay()
 
     def toggle_pass_through(self):
+        self._commit_text()
         if not self.isVisible():
             # From the tray while hidden: come back first, so the badge
             # isn't left floating over nothing.
@@ -1308,7 +2793,7 @@ class Overlay(QWidget):
         if not ok and self._click_through_native_ok is not False:
             logger.warning("Couldn't set native click-through; relying on Qt's attribute only")
         self._click_through_native_ok = ok
-        self.panel.setVisible(not self.pass_through)
+        self.panel.setVisible(not self.pass_through and not self._ui_hidden)
         self.pass_btn.setChecked(self.pass_through)
         focus = QApplication.focusWindow()
         # One line per transition, so a report of "toolbar stopped
@@ -1332,6 +2817,7 @@ class Overlay(QWidget):
             self.raise_()
             self.activateWindow()
             self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+            self.claim_foreground("pass-through off")
 
         # The backdrop layer checks self.pass_through itself every repaint
         # (see _paint_backdrop), so no canvas rebuild is needed here either.
@@ -1339,28 +2825,41 @@ class Overlay(QWidget):
         QApplication.processEvents()
 
     def undo(self):
+        self._commit_text()
         if self.history.undo():
             self._rebuild_canvas()
             self._refresh_history_buttons()
             self.update()
 
     def redo(self):
+        self._commit_text()
         if self.history.redo():
             self._rebuild_canvas()
             self._refresh_history_buttons()
             self.update()
 
     def clear(self):
-        if len(self.history) == 0 and self.current is None:
+        """Remove every annotation as one undoable step. The captured image,
+        margin and backdrop stay."""
+        self._cancel_text()
+        if self.current is not None:
+            self.current = None
+            self._live_layer = None
+        if len(self.history) == 0:
+            self.update()
             return
-        self.history.clear()
-        self.current = None
+        self._set_selection(None)
+        self.history.change(list(self.history.strokes), [])
         self._rebuild_canvas()
         self._refresh_history_buttons()
         self.update()
+        self.status_changed.emit("Cleared. Ctrl+Z brings it back")
 
     def _refresh_history_buttons(self):
-        self.undo_btn.setEnabled(len(self.history) > 0)
+        if self.selection is not None and not self.history.contains(self.selection):
+            self.selection = None
+            self._sync_text_bar()
+        self.undo_btn.setEnabled(len(self.history.undo_stack) > 0)
         self.redo_btn.setEnabled(len(self.history.redo_stack) > 0)
 
     # -- stroke lifecycle --------------------------------------------------
@@ -1376,43 +2875,88 @@ class Overlay(QWidget):
             return
         self.raw_pos = QPointF(pos)
         self.lazy_pos = QPointF(pos)
-        self.cursor_pos = QPointF(pos)
+        self._move_cursor(QPointF(pos))
         self.pressure = pressure if pressure > 0 else C.DEFAULT_PRESSURE
         use_eraser = self.mode == "eraser" if eraser is None else (eraser or self.mode == "eraser")
         # Brush size is on-screen size; a fitted (shrunk) capture gets a
         # proportionally larger stroke in image pixels.
-        self.current = Stroke(self.color, self.brush_size / self._view_scale(), self.opacity, use_eraser)
+        shape = self.mode if self.mode in SHAPES and not use_eraser else None
+        base = self.eraser_size if use_eraser else self.brush_size
+        strength = self.eraser_opacity if use_eraser else self.opacity
+        self.current = Stroke(self.color, base / self._view_scale(), strength, use_eraser, shape)
         self._live_layer = None
         self._live_layer_origin = None
-        self._live_baked_index = 0
-        # Seed the first point immediately (rather than waiting for enough
-        # movement to pass the lazy-brush radius) so a plain tap still
-        # leaves a dot instead of silently drawing nothing.
-        self._last_effective_pressure = brush.effective_pressure(self.pressure, 0.0)
-        self.current.points.append((QPointF(self.lazy_pos), self._last_effective_pressure))
-        self._last_point_time = time.monotonic()
+        if shape is not None:
+            # Two points, start and end, both at the press. No lazy brush.
+            self.lazy_pos = None
+            self._shape_raw_end = QPointF(pos)
+            self._last_effective_pressure = brush.SHAPE_PRESSURE
+            self.current.points = [(QPointF(pos), brush.SHAPE_PRESSURE), (QPointF(pos), brush.SHAPE_PRESSURE)]
+            self.history.redo_stack.clear()
+            self._refresh_history_buttons()
+            return
+        # Freehand, brush or eraser: libmypaint gets every input event with
+        # its time step, pressure and tilt, and does its own dynamics. A
+        # mouse (no pressure sensor) paints at full pressure.
+        self.current.brush = self._stroke_spec(use_eraser)
+        self.current.dtimes = [0.0]
+        self.current.tilts = [self._tilt]
+        self._mp_has_pressure = self._input_has_pressure
+        first = self.pressure if self._mp_has_pressure else mypaint_engine.MOUSE_PRESSURE
+        self._stroke_pressure = first
+        self.current.points.append((QPointF(pos), first))
+        self._mp_last_time = time.monotonic()
+        self._mp = mypaint_engine.StrokePainter(self.current, self._canvas_dpr())
+        self._feed_mypaint([(pos.x(), pos.y(), first, 0.0, *self._tilt)])
+        self._note_stroke_pressure(first)
+        self._stroke_log_start = max(0, len(self._input_log) - 4)
+        self._stroke_foreground = (native_windows.is_foreground(int(self.winId()))
+                                   if self.isVisible() and QGuiApplication.platformName() == "windows" else None)
         self.history.redo_stack.clear()
         self._refresh_history_buttons()
 
     def _add_point(self, pos, pressure):
         if self.pass_through or not self.current:
             return
-        raw = QPointF(pos)
+        if self.current.shape is not None:
+            self._move_cursor(QPointF(pos))
+            self._shape_raw_end = QPointF(pos)
+            self._update_shape_end()
+            return
+        if self._mp is None:
+            return
+        # The stabilizer (SMOOTH) moves a lazy point after the pen; every
+        # event still goes to libmypaint with its time step, so its own
+        # dynamics see a steady stream even while the lazy point rests.
         prev_cursor = self.cursor_pos
-        prev_lazy = QPointF(self.lazy_pos)
-        self.cursor_pos = raw
-        self.pressure = pressure if pressure > 0 else C.DEFAULT_PRESSURE
+        self._move_cursor(QPointF(pos))
+        if self.smoothing > 0.02:
+            self._advance_lazy(QPointF(pos))
+        else:
+            self.lazy_pos = QPointF(pos)
+        at = QPointF(self.lazy_pos)
+        now = time.monotonic()
+        dt = max(1e-4, now - self._mp_last_time)
+        self._mp_last_time = now
+        pr = (pressure if pressure > 0 else 0.0) if self._mp_has_pressure else mypaint_engine.MOUSE_PRESSURE
+        self._stroke_pressure = pr
+        self.current.points.append((at, pr))
+        self.current.dtimes.append(dt)
+        self.current.tilts.append(self._tilt)
+        self._feed_mypaint([(at.x(), at.y(), pr, dt, *self._tilt)])
+        self._note_stroke_pressure(pr)
+        self._mark_dirty(prev_cursor, self.cursor_pos, at)
 
-        view_scale = self._view_scale()
-        radius = (2 + self.smoothing * 44) / view_scale
+    def _advance_lazy(self, raw):
+        """The stabilizer shared by all engines: a lazy point trails the pen
+        on a string whose length grows with SMOOTH, and eases toward it.
+        Returns False while the pen is still within the string's slack."""
+        radius = (2 + self.smoothing * 44) / self._view_scale()
         dx = raw.x() - self.lazy_pos.x()
         dy = raw.y() - self.lazy_pos.y()
         dist = (dx * dx + dy * dy) ** 0.5
-
         if dist <= radius:
-            self._mark_dirty(prev_cursor, raw)
-            return
-
+            return False
         pull = (dist - radius) / dist
         target = QPointF(self.lazy_pos.x() + dx * pull, self.lazy_pos.y() + dy * pull)
         ease = 0.72 - self.smoothing * 0.22
@@ -1420,83 +2964,123 @@ class Overlay(QWidget):
             self.lazy_pos.x() + (target.x() - self.lazy_pos.x()) * ease,
             self.lazy_pos.y() + (target.y() - self.lazy_pos.y()) * ease,
         )
+        return True
 
-        last_point, _ = self.current.points[-1]
-        moved = ((last_point.x() - self.lazy_pos.x()) ** 2 + (last_point.y() - self.lazy_pos.y()) ** 2) ** 0.5
-        if moved >= C.MIN_POINT_SPACING / view_scale:
-            now = time.monotonic()
-            dt = max(1e-3, now - self._last_point_time)
-            speed = moved * view_scale / dt  # on-screen speed
-            self._last_effective_pressure = brush.effective_pressure(self.pressure, speed)
-            self.current.points.append((QPointF(self.lazy_pos), self._last_effective_pressure))
-            self._last_point_time = now
-            self._extend_live_layer()
-        self._mark_dirty(prev_cursor, raw, prev_lazy, self.lazy_pos)
-
-    # How many already-baked trailing points to recompute with each new one.
-    # Catmull-Rom segment i depends only on points i-1..i+2, so a small
-    # overlap reproduces the same curve as a full-stroke recompute.
-    _LIVE_LAYER_OVERLAP = 3
-
-    def _extend_live_layer(self):
+    def _update_shape_end(self):
+        """Re-place the live shape's end from the raw drag point and the
+        current Shift state, and refresh its preview layer."""
         stroke = self.current
-        points = stroke.points
-        n = len(points)
-        start = max(0, self._live_baked_index - self._LIVE_LAYER_OVERLAP)
-        window = points[start:]
-        if len(window) < 2:
+        if stroke is None or stroke.shape is None or self._shape_raw_end is None:
             return
-        # The true point preceding the window, so its first segment's
-        # curvature matches what a full-stroke recompute would produce
-        # instead of being (wrongly) treated as the start of the stroke.
-        extra_before = points[start - 1][0] if start > 0 else None
-        segments = brush.segments_for_points(window, stroke.size, extra_before=extra_before)
-        dpr = self._canvas_dpr()
-        layer = brush.render_stroke_layer(stroke, segments, dpr)
-        if layer is None:
-            return
-        new_pixmap, new_origin = layer
-        new_rect = brush.logical_rect(new_origin, new_pixmap)
+        old = self._shape_dirty_rect()
+        start = stroke.points[0][0]
+        end = self._shape_raw_end
+        if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
+            end = brush.constrain_end(stroke.shape, start, end)
+        stroke.points[-1] = (QPointF(end), brush.SHAPE_PRESSURE)
+        layer = brush.render_shape_layer(stroke, self._canvas_dpr())
+        self._live_layer, self._live_layer_origin = layer if layer else (None, None)
+        self.update(old.united(self._shape_dirty_rect()))
 
+    def _shape_dirty_rect(self):
+        """Window rect covering the live shape (arrowheads can reach past
+        the dirty margin around its two points)."""
+        if self.current is None or self.current.shape is None:
+            return QRect()
+        bounds = QRectF(brush.shape_bounds(self.current))
+        if self.capture is not None:
+            bounds = self.capture.transform().mapRect(bounds)
+        return bounds.toAlignedRect().adjusted(-2, -2, 2, 2)
+
+    def _feed_mypaint(self, events):
+        changed = self._mp.add(events)
+        if changed is None:
+            return
+        piece = self._mp.read(changed)
+        if piece is not None:
+            # The surface holds the stroke so far; a piece replaces what the
+            # live layer had there.
+            self._merge_live(*piece, replace=True)
+            self._update_doc_rect(QRectF(brush.logical_rect(piece[1], piece[0])))
+
+    def _update_doc_rect(self, rect):
+        """Repaint a stroke-coordinate rect."""
+        if self.capture is not None:
+            rect = self.capture.transform().mapRect(rect)
+        self.update(rect.toAlignedRect().adjusted(-2, -2, 2, 2))
+
+    def _paint_live(self, painter):
+        if self._live_layer is not None:
+            painter.drawPixmap(self._live_layer_origin, self._live_layer)
+
+    def _merge_live(self, new_pixmap, new_origin, replace=False):
+        """Composite a freshly rendered piece onto the live stroke layer,
+        growing the layer when the piece falls outside it. With replace the
+        piece overwrites that area instead of blending over it."""
+        dpr = self._canvas_dpr()
+        new_rect = brush.logical_rect(new_origin, new_pixmap)
         if self._live_layer is None:
             self._live_layer, self._live_layer_origin = new_pixmap, new_origin
+            return
+        mode = (QPainter.CompositionMode.CompositionMode_Source if replace
+                else QPainter.CompositionMode.CompositionMode_SourceOver)
+        old_rect = brush.logical_rect(self._live_layer_origin, self._live_layer)
+        if old_rect.contains(new_rect):
+            painter = QPainter(self._live_layer)
+            try:
+                painter.setCompositionMode(mode)
+                painter.drawPixmap(new_origin - self._live_layer_origin, new_pixmap)
+            finally:
+                painter.end()
         else:
-            old_rect = brush.logical_rect(self._live_layer_origin, self._live_layer)
-            if old_rect.contains(new_rect):
-                # Fits in the existing buffer, so draw in place. The buffer
-                # is always alpha=255 internally and opacity is applied once
-                # at final composite, so painting opaque over opaque here
-                # can't double-blend.
-                painter = QPainter(self._live_layer)
-                try:
-                    painter.drawPixmap(new_origin - self._live_layer_origin, new_pixmap)
-                finally:
-                    painter.end()
-            else:
-                union = old_rect.united(new_rect)
-                merged = brush.new_layer(union.size(), dpr)
-                painter = QPainter(merged)
-                try:
-                    painter.drawPixmap(old_rect.topLeft() - union.topLeft(), self._live_layer)
-                    painter.drawPixmap(new_rect.topLeft() - union.topLeft(), new_pixmap)
-                finally:
-                    painter.end()
-                self._live_layer, self._live_layer_origin = merged, union.topLeft()
-        self._live_baked_index = n
+            # Grow with headroom, so a stroke heading off the layer doesn't
+            # reallocate and copy the whole layer on every event. On the
+            # 4 px grid that keeps copies on whole device pixels.
+            union = old_rect.united(new_rect)
+            pad = 192
+            union = QRect(union.left() - pad, union.top() - pad, union.width() + 2 * pad, union.height() + 2 * pad)
+            union = QRect(union.left() // 4 * 4, union.top() // 4 * 4,
+                          (union.width() + 7) // 4 * 4, (union.height() + 7) // 4 * 4)
+            merged = brush.new_layer(union.size(), dpr)
+            painter = QPainter(merged)
+            try:
+                painter.drawPixmap(old_rect.topLeft() - union.topLeft(), self._live_layer)
+                painter.setCompositionMode(mode)
+                painter.drawPixmap(new_rect.topLeft() - union.topLeft(), new_pixmap)
+            finally:
+                painter.end()
+            self._live_layer, self._live_layer_origin = merged, union.topLeft()
 
     def _end_stroke(self):
         if self.current:
             finished = self.current
+            if self._mp is not None:
+                self._log_stroke(finished)
+                # The live surface is the final stroke: cache it rather than
+                # replaying every event on pen-up.
+                layer = self._mp.layer()
+                if layer is not None:
+                    brushes.layer_cache.put(finished, self._canvas_dpr(), layer)
+                else:
+                    finished.points = []  # libmypaint painted nothing
+                self._mp.close()
+                self._mp = None
+            shape_rect = self._shape_dirty_rect()
+            self._shape_raw_end = None
+            if finished.shape is not None and brush.shape_is_degenerate(finished, 2.0 / self._view_scale()):
+                # A click without a drag: nothing to commit.
+                finished.points = []
             self.current = None
             self.lazy_pos = None
             self._live_layer = None
             self._live_layer_origin = None
-            self._live_baked_index = 0
             if finished.points:
                 self.history.commit(finished)
                 self._commit_stroke_to_canvas(finished)
                 self._refresh_history_buttons()
                 self._mark_dirty(*(p for p, _ in finished.points))
+                if finished.shape is not None:
+                    self.update(shape_rect)
             else:
                 self.update()
 
@@ -1551,22 +3135,34 @@ class Overlay(QWidget):
         raw = float(event.pressure())
         key = self._device_key(event)
         if key in self._no_pressure_devices:
-            return C.DEFAULT_PRESSURE
+            if raw > 0.0 and (self._tablet_contact or event.type() == QEvent.Type.TabletPress):
+                self._no_pressure_devices.discard(key)
+                logger.info("Pen %s reports pressure again; using it", key)
+            else:
+                return C.DEFAULT_PRESSURE
         dev = event.pointingDevice()
+        self._input_has_pressure = False
         if dev is not None and not (dev.capabilities() & QInputDevice.Capability.Pressure):
             self._mark_no_pressure(key, "driver reports no pressure capability")
             return C.DEFAULT_PRESSURE
-        if event.type() == QEvent.Type.TabletPress:
+        # A pen with a dead pressure sensor reports 0 for a whole stroke;
+        # only then fall back to fixed pressure. Zeros while the tip lands
+        # (common with Windows Ink) don't count, as long as the stroke
+        # reports pressure at some point.
+        etype = event.type()
+        if etype == QEvent.Type.TabletPress:
             self._zero_pressure_run = 0
-        if self._tablet_contact or event.type() == QEvent.Type.TabletPress:
+            self._stroke_events = 0
+        if self._tablet_contact or etype == QEvent.Type.TabletPress:
+            self._stroke_events = getattr(self, "_stroke_events", 0) + 1
             if raw <= 0.0:
                 self._zero_pressure_run += 1
-                if self._zero_pressure_run >= _ZERO_PRESSURE_EVENTS:
-                    self._mark_no_pressure(key, "pressure stayed at 0 while drawing")
-                    return C.DEFAULT_PRESSURE
-            else:
-                self._zero_pressure_run = 0
-        return max(0.01, raw)
+        if etype == QEvent.Type.TabletRelease:
+            if self._zero_pressure_run >= _ZERO_PRESSURE_EVENTS and                     self._zero_pressure_run >= getattr(self, "_stroke_events", 0):
+                self._mark_no_pressure(key, "pressure stayed at 0 for a whole stroke")
+            self._zero_pressure_run = 0
+        self._input_has_pressure = True
+        return max(0.01, self._curved(raw))
 
     def _mark_no_pressure(self, key, why):
         if key not in self._no_pressure_devices:
@@ -1576,7 +3172,12 @@ class Overlay(QWidget):
 
     def _handle_tablet_event(self, event):
         event_type = event.type()
+        raw_pressure = float(event.pressure())
+        if event.type() == QEvent.Type.TabletPress:
+            close_panels()
         pressure = self._tablet_pressure(event)
+        self._tilt = mypaint_engine.tilt(event.xTilt(), event.yTilt())
+        self._diag_event("tablet", event, raw_pressure, pressure)
         pos = self._overlay_pos(event)
         is_eraser_tip = event.pointerType() == QPointingDevice.PointerType.Eraser
 
@@ -1626,6 +3227,16 @@ class Overlay(QWidget):
             event.accept()
             return
 
+        if self._adjust is not None or (event_type == QEvent.Type.TabletPress
+                                        and event.button() == Qt.MouseButton.RightButton
+                                        and event.modifiers() & Qt.KeyboardModifier.AltModifier):
+            kind = {QEvent.Type.TabletPress: "press", QEvent.Type.TabletMove: "move",
+                    QEvent.Type.TabletRelease: "release"}.get(event_type)
+            if kind is not None:
+                self._adjust_input(kind, pos)
+            event.accept()
+            return
+
         pos = self._to_doc(pos)
         if event_type == QEvent.Type.TabletPress:
             is_alt = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
@@ -1633,13 +3244,24 @@ class Overlay(QWidget):
                 self._pick_color_and_restore_mode(event.globalPosition())
                 event.accept()
                 return
+            if is_eraser_tip:
+                self._commit_text()
+            elif self._annotation_press(pos, event.modifiers()):
+                self._tablet_contact = True
+                event.accept()
+                return
             self._tablet_contact = True
             self._begin_stroke(pos, pressure, eraser=is_eraser_tip)
         elif event_type == QEvent.Type.TabletMove:
             if self._tablet_contact and self.current is not None:
                 self._add_point(pos, pressure)
+            elif self._tablet_contact and (self._drag is not None or self._text_dragging):
+                self._annotation_move(pos)
+            elif not self._tablet_contact and self.current is None:
+                self._move_cursor(pos)
         elif event_type == QEvent.Type.TabletRelease:
             self._tablet_contact = False
+            self._annotation_release()
             self._end_stroke()
 
         event.accept()
@@ -1651,6 +3273,8 @@ class Overlay(QWidget):
         return self._tablet_contact or (time.monotonic() - self._last_tablet_time) < C.TABLET_MOUSE_GUARD_S
 
     def mousePressEvent(self, event):
+        self._diag_event("mouse", event)
+        close_panels()
         try:
             if self._is_tablet_synthesized():
                 event.accept()
@@ -1658,6 +3282,16 @@ class Overlay(QWidget):
             pos = self._overlay_pos(event)
             if self.pass_through:
                 event.ignore()
+                return
+            if (event.button() == Qt.MouseButton.RightButton and event.modifiers() & Qt.KeyboardModifier.AltModifier
+                    and not self._point_over_ui(pos)):
+                self._adjust_input("press", pos)
+                event.accept()
+                return
+            if event.button() == Qt.MouseButton.MiddleButton and self.capture is not None:
+                self._mid_pan = True
+                self._pan_input("press", pos)
+                event.accept()
                 return
             if event.button() == Qt.MouseButton.LeftButton and not self._point_over_ui(pos):
                 if self._selecting:
@@ -1673,6 +3307,11 @@ class Overlay(QWidget):
                     self._pick_color_and_restore_mode(event.globalPosition())
                     event.accept()
                     return
+                if self._annotation_press(self._to_doc(pos), event.modifiers()):
+                    event.accept()
+                    return
+                self._input_has_pressure = False
+                self._tilt = (0.0, 0.0)
                 self._begin_stroke(self._to_doc(pos), 0.65)
                 event.accept()
         except Exception:
@@ -1680,6 +3319,8 @@ class Overlay(QWidget):
             event.accept()
 
     def mouseMoveEvent(self, event):
+        if event.buttons():
+            self._diag_event("mouse", event)
         try:
             if self._is_tablet_synthesized():
                 event.accept()
@@ -1688,17 +3329,19 @@ class Overlay(QWidget):
                 event.ignore()
                 return
             pos = self._overlay_pos(event)
-            if self._selecting:
+            if self._adjust is not None:
+                self._adjust_input("move", pos)
+            elif self._selecting:
                 if event.buttons() & Qt.MouseButton.LeftButton:
                     self._selection_input("move", pos)
             elif self._panning is not None:
                 self._pan_input("move", pos)
+            elif self._drag is not None or self._text_dragging:
+                self._annotation_move(self._to_doc(pos))
             elif event.buttons() & Qt.MouseButton.LeftButton and not self._point_over_ui(pos):
                 self._add_point(self._to_doc(pos), 0.65)
             else:
-                prev_cursor = self.cursor_pos
-                self.cursor_pos = self._to_doc(pos)
-                self._mark_dirty(prev_cursor, self.cursor_pos)
+                self._move_cursor(self._to_doc(pos))
         except Exception:
             logger.exception("Error handling mouse move")
             event.accept()
@@ -1711,12 +3354,22 @@ class Overlay(QWidget):
             if self.pass_through:
                 event.ignore()
                 return
+            if self._adjust is not None and event.button() == Qt.MouseButton.RightButton:
+                self._adjust_input("release", self._overlay_pos(event))
+                event.accept()
+                return
+            if self._mid_pan and event.button() == Qt.MouseButton.MiddleButton:
+                self._mid_pan = False
+                self._pan_input("release", self._overlay_pos(event))
+                event.accept()
+                return
             if event.button() == Qt.MouseButton.LeftButton:
                 if self._selecting:
                     self._selection_input("release", self._overlay_pos(event))
                 elif self._panning is not None:
                     self._pan_input("release", self._overlay_pos(event))
                 else:
+                    self._annotation_release()
                     self._end_stroke()
                 event.accept()
         except Exception:
@@ -1728,7 +3381,7 @@ class Overlay(QWidget):
     def _dirty_margin(self):
         # Generously covers stroke width, the brush-size cursor ring, and
         # the smoothing guide line so a dirty rect never clips live drawing.
-        return self.brush_size * 1.6 + 12
+        return max(self.brush_size, self.eraser_size) * 1.6 + 12
 
     def _mark_dirty(self, *points):
         # Points are in stroke coordinates; repaint where they show.
@@ -1747,28 +3400,30 @@ class Overlay(QWidget):
         self.update(rect)
 
     def _draw_stroke(self, painter, stroke):
-        segments = brush.stroke_segments(stroke)
-        if not segments:
+        if stroke.shape is not None:
+            layer = brush.render_shape_layer(stroke, self._canvas_dpr())
+            if layer is not None:
+                pixmap, origin = layer
+                painter.save()
+                painter.setOpacity(max(0.01, min(1.0, stroke.opacity)))
+                painter.drawPixmap(origin, pixmap)
+                painter.restore()
             return
-
-        if stroke.eraser:
-            # CompositionMode_Clear sets destination alpha to 0, which is
-            # idempotent, so overlapping segments never build up. No
-            # opaque-layer step needed.
-            painter.save()
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-            brush.paint_segments(painter, segments, QColor(0, 0, 0, 255))
-            painter.restore()
-            return
-
-        # Flatten the stroke to an opaque offscreen layer, then blend that
-        # onto the target once at stroke.opacity. Blending each segment
-        # separately would double up wherever the stroke overlaps itself.
-        layer = brush.render_stroke_layer(stroke, segments, self._canvas_dpr())
+        # Either engine flattens the stroke on its own layer (cached for dab
+        # strokes), blended once at stroke.opacity so it never doubles up
+        # where it overlaps itself. An eraser's layer is its coverage mask,
+        # removed from what is below with DestinationOut.
+        layer = brushes.freehand_layer(stroke, self._canvas_dpr())
         if layer is None:
             return
         pixmap, origin = layer
+        if stroke.eraser:
+            painter.save()
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationOut)
+            painter.setOpacity(max(0.01, min(1.0, stroke.opacity)))
+            painter.drawPixmap(origin, pixmap)
+            painter.restore()
+            return
         painter.save()
         painter.setOpacity(max(0.01, min(1.0, stroke.opacity)))
         painter.drawPixmap(origin, pixmap)
@@ -1900,10 +3555,52 @@ class Overlay(QWidget):
         painter = QPainter(self._canvas)
         try:
             painter.translate(-self._canvas_origin)
+            hidden = getattr(self, "_hidden_stroke", None)
+            absorbers = {}
             for stroke in self.history:
+                for eraser, _t in stroke.erasures:
+                    absorbers.setdefault(id(eraser), []).append(stroke)
+            drawn = set()
+            for stroke in self.history:
+                if stroke is hidden:
+                    continue
                 self._draw_stroke(painter, stroke)
+                drawn.add(id(stroke))
+                if stroke.eraser and id(stroke) in absorbers:
+                    below = [a for a in absorbers[id(stroke)] if id(a) in drawn]
+                    if below:
+                        self._restore_under_eraser(painter, stroke, below)
         finally:
             painter.end()
+
+    def _restore_under_eraser(self, painter, eraser, annotations):
+        """Inside `eraser`, put back the annotations below it that carry it
+        in their own erasures (selection.absorb). They draw their erased
+        parts where they are now, so this eraser must not also clear them
+        where it was drawn. Exact under antialiasing: Clear left
+        dst * (1 - coverage), and this adds annotation * coverage."""
+        dpr = self._canvas_dpr()
+        found = brushes.freehand_layer(eraser, dpr)
+        if found is None:
+            return
+        mask, origin = found
+        bounds = brush.logical_rect(origin, mask)
+        layer = brush.new_layer(bounds.size(), dpr)
+        p = QPainter(layer)
+        try:
+            p.translate(-QPointF(bounds.topLeft()))
+            for stroke in annotations:
+                self._draw_stroke(p, stroke)
+            p.resetTransform()
+            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+            p.setOpacity(max(0.01, min(1.0, eraser.opacity)))
+            p.drawPixmap(0, 0, mask)
+        finally:
+            p.end()
+        painter.save()
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
+        painter.drawPixmap(bounds.topLeft(), layer)
+        painter.restore()
 
     def _target_dpr(self):
         """Pixel density for the canvas: the monitor's scale factor, unless
@@ -1950,9 +3647,12 @@ class Overlay(QWidget):
                     painter.setClipRect(self.drawable_rect())
 
             live_eraser = (
-                self.current is not None and self.current.eraser and self._live_layer is not None
+                self.current is not None and self.current.eraser
+                and self._live_layer is not None
             )
-            if live_eraser:
+            if self._peek:
+                pass  # H held: the artwork alone, for a before/after look
+            elif live_eraser:
                 # The live eraser preview should reveal the backdrop through
                 # the drawing layer only. A plain DestinationOut against
                 # this shared painter would punch through the backdrop too,
@@ -1972,7 +3672,8 @@ class Overlay(QWidget):
                     tp.translate(-dirty.topLeft())
                     tp.drawPixmap(self._canvas_origin, self._canvas)
                     tp.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationOut)
-                    tp.drawPixmap(self._live_layer_origin, self._live_layer)
+                    tp.setOpacity(max(0.01, min(1.0, self.current.opacity)))
+                    self._paint_live(tp)
                 finally:
                     tp.end()
                 painter.drawPixmap(dirty.topLeft(), temp)
@@ -1984,11 +3685,23 @@ class Overlay(QWidget):
                     # eraser does. No buffer needed.
                     painter.save()
                     painter.setOpacity(max(0.01, min(1.0, self.current.opacity)))
-                    painter.drawPixmap(self._live_layer_origin, self._live_layer)
+                    self._paint_live(painter)
                     painter.restore()
+
+            if self._floating is not None and not self._peek:
+                self._paint_floating(painter, self._floating)
+            if self._text_edit is not None and not self._capturing and not self._peek:
+                self._paint_live_text(painter)
 
             if clipped:
                 painter.restore()
+            if (self.selection is not None and self._text_edit is None and not self._capturing
+                    and not self.pass_through and not self._peek):
+                self._paint_selection(painter)
+            if self._adjust is not None and not self._capturing:
+                self._paint_adjust_hud(painter)
+            if self.show_input_diag and not self._capturing:
+                self._paint_input_diag(painter)
             if self.region is not None and not self._capturing and not self.pass_through:
                 self._paint_region_frame(painter, self.region)
             if self._selecting and self._selection_anchor is not None and not self._capturing:
@@ -1997,13 +3710,19 @@ class Overlay(QWidget):
 
             # Not while capturing: a real mouse move during the capture delay
             # sets cursor_pos again and would put the ring in the screenshot.
+            self._cursor_drawn = None
             if (not self.pass_through and self.cursor_pos and not self._selecting and not self._capturing
-                    and not self._wants_pan()):
+                    and not self._wants_pan() and self.mode not in ("text", "select")
+                    and self.brush_cursor != "hidden"):
+                self._cursor_drawn = self._cursor_rect()
                 painter.save()
                 # Ring and guide in window coordinates, at on-screen size.
                 cursor_view = self._to_view(self.cursor_pos)
                 lazy_view = self._to_view(self.lazy_pos) if self.lazy_pos else None
-                d = brush.width_for(self.brush_size, self._last_effective_pressure)
+                d = self._ring_diameter()
+                if (time.monotonic() < self._size_preview_until and self.current is None
+                        and self.mode in ("brush", "eraser")):
+                    self._paint_size_preview(painter, cursor_view, d)
                 if self.mode == "eraser":
                     ring_color = QColor(255, 255, 255, 210)
                 else:
@@ -2011,13 +3730,251 @@ class Overlay(QWidget):
                     ring_color.setAlpha(220)
                 painter.setPen(QPen(ring_color, 1.4))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawEllipse(cursor_view, d / 2, d / 2)
+                if self.brush_cursor == "crosshair":
+                    arm = self._CROSSHAIR / 2
+                    painter.setPen(QPen(QColor(0, 0, 0, 150), 3))
+                    painter.drawLine(QPointF(cursor_view.x() - arm, cursor_view.y()),
+                                     QPointF(cursor_view.x() + arm, cursor_view.y()))
+                    painter.drawLine(QPointF(cursor_view.x(), cursor_view.y() - arm),
+                                     QPointF(cursor_view.x(), cursor_view.y() + arm))
+                    painter.setPen(QPen(QColor(255, 255, 255, 230), 1.2))
+                    painter.drawLine(QPointF(cursor_view.x() - arm, cursor_view.y()),
+                                     QPointF(cursor_view.x() + arm, cursor_view.y()))
+                    painter.drawLine(QPointF(cursor_view.x(), cursor_view.y() - arm),
+                                     QPointF(cursor_view.x(), cursor_view.y() + arm))
+                else:
+                    painter.drawEllipse(cursor_view, d / 2, d / 2)
                 if lazy_view is not None and self.smoothing > 0.02:
                     painter.setPen(QPen(QColor(255, 255, 255, 95), 1))
                     painter.drawLine(lazy_view, cursor_view)
                 painter.restore()
         finally:
             painter.end()
+
+    _CROSSHAIR = 16
+
+    def _cursor_rect(self):
+        """Window rect the brush cursor covers now: the ring (or crosshair),
+        the size preview, and the stabilizer guide to the lazy point."""
+        if self.cursor_pos is None:
+            return None
+        c = self._to_view(self.cursor_pos)
+        r = max(self._ring_diameter(), self._CROSSHAIR) / 2 + 4
+        rect = QRectF(c.x() - r, c.y() - r, 2 * r, 2 * r)
+        if self.lazy_pos is not None and self.smoothing > 0.02:
+            lz = self._to_view(self.lazy_pos)
+            rect = rect.united(QRectF(lz.x() - 2, lz.y() - 2, 4, 4))
+        return rect.toAlignedRect()
+
+    def _move_cursor(self, doc_pos):
+        """Move the brush cursor: repaint where it was last drawn and where
+        it goes, so only one is ever visible."""
+        old = self._cursor_drawn
+        self.cursor_pos = doc_pos
+        if old is not None:
+            self.update(old.adjusted(-2, -2, 2, 2))
+        new = self._cursor_rect()
+        if new is not None:
+            self.update(new.adjusted(-2, -2, 2, 2))
+
+    def _set_brush_cursor(self, style):
+        if style in C.BRUSH_CURSORS:
+            self.brush_cursor = style
+            if hasattr(self, "cursor_buttons"):
+                for name, b in self.cursor_buttons.items():
+                    b.setChecked(name == style)
+            self._save_settings()
+            self.update()
+
+    def _ring_diameter(self):
+        """On-screen diameter of the brush ring: the size under the pen
+        while drawing (with pressure-driven size), full size hovering."""
+        size = self._active_size()
+        stroke = self.current
+        if stroke is not None and mypaint_engine.is_spec(stroke.brush):
+            return brushes.diameter(stroke.brush, size, self._stroke_pressure)
+        if self.mode in SHAPES:
+            return brush.width_for(size, self._last_effective_pressure)
+        return size
+
+    def _paint_size_preview(self, painter, center, d):
+        """The brush as it will paint at full pressure: a real libmypaint
+        dab, at its size."""
+        painter.save()
+        spec = self._stroke_spec(self.mode == "eraser")
+        color = QColor(255, 255, 255) if self.mode == "eraser" else self.color
+        pm = brush_preview.dab(spec, color, d, self._window_dpr())
+        if pm is not None:
+            painter.setOpacity(0.6 if self.mode == "eraser" else self.opacity)
+            r = pm.deviceIndependentSize()
+            painter.drawPixmap(QPointF(center.x() - r.width() / 2, center.y() - r.height() / 2), pm)
+        painter.restore()
+
+    # -- input diagnostic -------------------------------------------------------------
+
+    def toggle_input_diag(self):
+        self.show_input_diag = not self.show_input_diag
+        if hasattr(self, "diag_btn"):
+            self.diag_btn.setChecked(self.show_input_diag)
+        self.status_changed.emit("Input diagnostic on (Ctrl+Shift+I)" if self.show_input_diag
+                                 else "Input diagnostic off")
+        self.update()
+
+    def _note_device(self, event, via):
+        """Log each input device once, as Qt reports it: the first thing to
+        look at when a pen draws without pressure."""
+        try:
+            dev = event.pointingDevice()
+            name = dev.name() if dev is not None else "?"
+            key = (via, name, dev.type().name if dev else "?", dev.pointerType().name if dev else "?")
+        except Exception:
+            return
+        if key in self._seen_devices:
+            return
+        self._seen_devices.add(key)
+        caps = []
+        try:
+            c = dev.capabilities()
+            for flag in ("Pressure", "XTilt", "YTilt", "Rotation", "TangentialPressure", "MouseEmulation"):
+                if c & getattr(QInputDevice.Capability, flag):
+                    caps.append(flag)
+        except Exception:
+            pass
+        logger.info("Input seen via %s events: device %r type=%s pointer=%s caps=%s", via, key[1], key[2], key[3],
+                    "+".join(caps) or "none")
+
+    def _diag_event(self, via, event, raw=None, processed=None):
+        self._note_device(event, via)
+        try:
+            dev = event.pointingDevice()
+            dev_name = dev.name() if dev is not None else "?"
+            pointer = dev.pointerType().name if dev is not None else "?"
+            if pointer in ("Pen", "Eraser"):
+                self._pen_seen = True
+            self._input_log.append((time.monotonic(), via, event.type().name, dev_name, pointer,
+                                    raw, event.source().name if via == "mouse" else ""))
+        except Exception:
+            pass
+        if not self.show_input_diag:
+            return
+        try:
+            dev = event.pointingDevice()
+            caps = dev.capabilities() if dev is not None else 0
+            d = self._diag
+            d["via"] = via
+            d["device"] = f"{dev.name() if dev else '?'} ({dev.type().name if dev else '?'}, " \
+                          f"{dev.pointerType().name if dev else '?'})"
+            d["pressure_cap"] = bool(caps & QInputDevice.Capability.Pressure) if dev is not None else False
+            d["event"] = event.type().name
+            if via == "mouse":
+                d["source"] = event.source().name
+            if raw is not None:
+                d["raw"] = raw
+                d["processed"] = processed
+                d["tilt"] = (event.xTilt(), event.yTilt())
+            d[via + "_count"] = d.get(via + "_count", 0) + 1
+            self.update(self._diag_rect())
+        except Exception:
+            logger.debug("input diagnostic", exc_info=True)
+
+    def _log_stroke(self, stroke):
+        """One line per stroke for the first strokes after each show, and
+        for any stroke that came as mouse input after a pen has been seen
+        (the case where pressure was missing), with its event sequence."""
+        if not stroke.points:
+            return
+        via = "tablet" if self._mp_has_pressure else "mouse"
+        pressures = [pr for _p, pr in stroke.points]
+        suspicious = via == "mouse" and self._pen_seen
+        if not suspicious and self._strokes_to_log <= 0:
+            return
+        self._strokes_to_log -= 1
+        fg = {True: "yes", False: "NO", None: "?"}[self._stroke_foreground]
+        logger.info("Stroke via %s: %d points, pressure %.2f..%.2f, overlay foreground=%s, %s%s", via,
+                    len(pressures), min(pressures), max(pressures), fg, self._stroke_timing(),
+                    "  [pen seen, but no pressure]" if suspicious else "")
+        if suspicious or self.show_input_diag:
+            events = list(self._input_log)[self._stroke_log_start:]
+            t0 = events[0][0] if events else 0
+            for t, v, kind, dev, pointer, raw, src in events[:24]:
+                logger.info("    %+6.0f ms  %-6s %-22s %-14s %-7s %s %s", (t - t0) * 1000, v, kind, dev, pointer,
+                            "" if raw is None else f"p={raw:.3f}", src)
+        if self.show_input_diag:
+            self._diag["last_stroke"] = f"via {via}, pressure {min(pressures):.2f}..{max(pressures):.2f}, " \
+                                        f"foreground {fg}"
+
+    def _stroke_timing(self):
+        """How the input arrived during the stroke: delay from press to the
+        first movement, and the largest gap between events. A long first
+        delay or gap with fast drawing means input was held back before it
+        reached the app."""
+        events = [e for e in list(self._input_log)[self._stroke_log_start:]
+                  if e[2] in ("TabletPress", "TabletMove", "MouseButtonPress", "MouseMove")]
+        if len(events) < 2:
+            return "timing n/a"
+        times = [e[0] for e in events]
+        gaps = [b - a for a, b in zip(times, times[1:])]
+        rate = (len(times) - 1) / max(1e-6, times[-1] - times[0])
+        return (f"first move after {gaps[0] * 1000:.0f} ms, largest gap {max(gaps) * 1000:.0f} ms, "
+                f"{rate:.0f} events/s")
+
+    def _note_stroke_pressure(self, pr):
+        if self.show_input_diag:
+            self._diag["stroke_pressure"] = pr
+            self.update(self._diag_rect())
+
+    def _foreground_text(self):
+        if native_windows.is_foreground(int(self.winId())):
+            return "this overlay"
+        _hwnd, _pid, name = native_windows.foreground_info()
+        return f"{name or 'another window'}  (the tablet driver follows that app's pen settings)"
+
+    def _diag_rect(self):
+        local = self._anchor_local_rect()
+        return QRect(local.x() + 16, local.y() + local.height() - 240, 560, 224)
+
+    def _paint_input_diag(self, painter):
+        d = self._diag
+        size = self._active_size()
+        spec = self.current.brush if (self.current is not None and self.current.brush is not None) \
+            else self._stroke_spec(self.mode == "eraser")
+        pr = d.get("stroke_pressure", 1.0)
+        size_p = getattr(spec, "size_pressure", False)
+        lines = [
+            "INPUT DIAGNOSTIC  (Ctrl+Shift+I)",
+            f"Last event   {d.get('event', '-')} via {d.get('via', '-')}"
+            + (f"  [{d.get('source')}]" if d.get('via') == 'mouse' else ""),
+            f"Device       {d.get('device', '-')}",
+            f"Pressure cap {'yes' if d.get('pressure_cap') else 'NO'}    tablet events {d.get('tablet_count', 0)}"
+            f"   mouse events {d.get('mouse_count', 0)}",
+            f"Raw pressure {d['raw']:.3f}   processed {d['processed']:.3f} ({self.pressure_curve})"
+            if "raw" in d else "Raw pressure -   (no tablet events yet)",
+            f"Tilt         x {d['tilt'][0]:+.0f}°  y {d['tilt'][1]:+.0f}°" if "tilt" in d else "Tilt         -",
+            f"Stroke       pressure {pr:.3f}  ->  diameter {brushes.diameter(spec, size, pr):.1f}px of {size:g}px"
+            f"   (size by pressure {'on' if size_p else 'off'})",
+            f"Last stroke  {d.get('last_stroke', '-')}",
+            f"Foreground   {self._foreground_text()}",
+        ]
+        if d.get("mouse_count", 0) and not d.get("tablet_count", 0):
+            lines.append("Pen arriving as a mouse: enable Windows Ink for this app in the tablet driver.")
+        r = QRectF(self._diag_rect())
+        painter.save()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(20, 20, 23, 230))
+        painter.drawRoundedRect(r, 8, 8)
+        f = QFont("Consolas")
+        f.setStyleHint(QFont.StyleHint.Monospace)
+        f.setPixelSize(12)
+        painter.setFont(f)
+        painter.setPen(QColor(C.TEXT))
+        y = r.top() + 20
+        for i, line in enumerate(lines):
+            if i == 0:
+                painter.setPen(QColor(C.TEXT_DIM))
+            painter.drawText(QPointF(r.left() + 12, y), line)
+            painter.setPen(QColor(C.TEXT))
+            y += 21
+        painter.restore()
 
     def _paint_region_frame(self, painter, rect, selecting=False):
         # Dashed light-on-dark outline, visible over any content. Not part of
@@ -2049,6 +4006,7 @@ class Overlay(QWidget):
         """F9. A saved screenshot opens in the default image viewer and the
         overlay hides to the tray with everything kept; the hotkey brings
         the session back. A failed one leaves the overlay up and says so."""
+        self._commit_text()
         if self._capturing or self._grabbing:
             return
         if self.capture is not None:

@@ -95,7 +95,7 @@ class AppConfig:
             color = C.DEFAULT_COLOR
         return {
             "color": color,
-            "size": int(_clamp(self._value("brush/size", C.DEFAULT_SIZE, int), C.MIN_SIZE, C.MAX_SIZE)),
+            "size": round(_clamp(self._value("brush/size", C.DEFAULT_SIZE, float), C.MIN_SIZE, C.MAX_SIZE), 2),
             "opacity": _clamp(self._value("brush/opacity", C.DEFAULT_OPACITY, float), 0.05, 1.0),
             "smoothing": _clamp(self._value("brush/smoothing", C.DEFAULT_SMOOTHING, float), 0.0, 0.9),
             "backdrop": backdrop,
@@ -103,6 +103,72 @@ class AppConfig:
                 self._value("brush/backdrop_opacity", C.DEFAULT_BACKDROP_OPACITY, float), 0.1, 1.0
             ),
             **self._load_margin(),
+            **self._load_text(),
+            **self._load_brush(),
+        }
+
+    def _load_brush(self):
+        # Brush keys; new, so older files fall back. Presets from earlier
+        # prototype engines map to the nearest current brush; their old
+        # hardness/spacing keys are simply no longer read.
+        from . import brushes
+        preset = brushes.migrate_preset(self._value("brush/preset", brushes.DEFAULT_PRESET, str))
+        pressure = {}
+        for key in brushes.PRESETS:
+            raw = self._value(f"brush/{key}_pressure", "", str)
+            parts = [p.strip() for p in str(raw).split(",")]
+            if len(parts) == 2 and all(p in ("0", "1") for p in parts):
+                pressure[key] = (parts[0] == "1", parts[1] == "1")
+        return {
+            "brush_preset": preset,
+            "eraser_size": round(_clamp(self._value("brush/eraser_size", C.DEFAULT_ERASER_SIZE, float),
+                                        C.MIN_SIZE, C.MAX_SIZE), 2),
+            "brush_pressure": pressure,
+            "pressure_curve": self._pick("brush/pressure_curve", "normal", tuple(C.PRESSURE_CURVES)),
+            "eraser_style": self._pick("brush/eraser_style", "hard", C.ERASER_STYLES),
+            "eraser_opacity": _clamp(self._value("brush/eraser_opacity", 1.0, float), 0.05, 1.0),
+            "recent_colors": self._colors("brush/recent_colors", C.RECENT_COLORS),
+            "favorite_colors": self._colors("brush/favorite_colors", C.FAVORITE_COLORS),
+            "toolbar_positions": self._positions(),
+            "brush_cursor": self._pick("ui/brush_cursor", "outline", C.BRUSH_CURSORS),
+        }
+
+    def _positions(self):
+        """Toolbar position per monitor: {monitor key: (x, y)} relative to
+        the monitor's top-left."""
+        import json
+        try:
+            raw = json.loads(self._value("ui/toolbar_positions", "{}", str))
+            return {str(k): (int(v[0]), int(v[1])) for k, v in raw.items()}
+        except (ValueError, TypeError, KeyError, IndexError, AttributeError):
+            return {}
+
+    def _colors(self, key, limit):
+        raw = self._value(key, "", str)
+        out = []
+        for part in str(raw).split(","):
+            c = QColor(part.strip())
+            if part.strip() and c.isValid() and c.name() not in out:
+                out.append(c.name())
+        return out[:limit]
+
+    def _pick(self, key, default, allowed):
+        value = self._value(key, default, str)
+        return value if value in allowed else default
+
+    def _load_text(self):
+        # New keys with defaults; older files simply don't have them, so no
+        # migration is needed.
+        from .text_fonts import DEFAULT_FAMILY, FAMILIES
+        family = self._value("text/family", DEFAULT_FAMILY, str)
+        align = self._value("text/align", "left", str)
+        bold = str(self._value("text/bold", "false", str)).strip().lower()
+        return {
+            "text_family": family if family in FAMILIES else DEFAULT_FAMILY,
+            "text_size": int(_clamp(self._value("text/size", C.DEFAULT_TEXT_SIZE, int),
+                                    C.MIN_TEXT_SIZE, C.MAX_TEXT_SIZE)),
+            "text_bold": bold in ("1", "true", "yes", "on"),
+            "text_align": align if align in C.TEXT_ALIGNS else "left",
         }
 
     def _load_margin(self):
@@ -118,9 +184,35 @@ class AppConfig:
 
     def save(self, *, color, size, opacity, smoothing, backdrop, backdrop_opacity,
              margin_enabled=C.DEFAULT_MARGIN_ENABLED, margin_size=C.DEFAULT_MARGIN_SIZE,
-             margin_color=C.DEFAULT_MARGIN_COLOR, margin_opacity=C.DEFAULT_MARGIN_OPACITY):
+             margin_color=C.DEFAULT_MARGIN_COLOR, margin_opacity=C.DEFAULT_MARGIN_OPACITY,
+             text_family=None, text_size=C.DEFAULT_TEXT_SIZE, text_bold=False, text_align="left",
+             eraser_size=None, brush_preset=None, brush_pressure=None, pressure_curve=None,
+             eraser_style=None, eraser_opacity=None, recent_colors=None, favorite_colors=None,
+             toolbar_positions=None, brush_cursor=None):
         self._settings.setValue("brush/color", QColor(color).name())
-        self._settings.setValue("brush/size", int(size))
+        self._settings.setValue("brush/size", round(float(size), 2))
+        if eraser_size is not None:
+            self._settings.setValue("brush/eraser_size", round(float(eraser_size), 2))
+        if brush_preset:
+            self._settings.setValue("brush/preset", brush_preset)
+        if pressure_curve:
+            self._settings.setValue("brush/pressure_curve", pressure_curve)
+        if eraser_style:
+            self._settings.setValue("brush/eraser_style", eraser_style)
+        if eraser_opacity is not None:
+            self._settings.setValue("brush/eraser_opacity", float(eraser_opacity))
+        if recent_colors is not None:
+            self._settings.setValue("brush/recent_colors", ",".join(recent_colors))
+        if favorite_colors is not None:
+            self._settings.setValue("brush/favorite_colors", ",".join(favorite_colors))
+        if brush_cursor:
+            self._settings.setValue("ui/brush_cursor", brush_cursor)
+        if toolbar_positions is not None:
+            import json
+            self._settings.setValue("ui/toolbar_positions",
+                                    json.dumps({k: list(v) for k, v in toolbar_positions.items()}))
+        for key, (size_p, opacity_p) in (brush_pressure or {}).items():
+            self._settings.setValue(f"brush/{key}_pressure", f"{int(bool(size_p))},{int(bool(opacity_p))}")
         self._settings.setValue("brush/opacity", float(opacity))
         self._settings.setValue("brush/smoothing", float(smoothing))
         self._settings.setValue("brush/backdrop", backdrop or _BACKDROP_NONE)
@@ -129,6 +221,11 @@ class AppConfig:
         self._settings.setValue("margin/size", int(margin_size))
         self._settings.setValue("margin/color", margin_color)
         self._settings.setValue("margin/opacity", float(margin_opacity))
+        if text_family:
+            self._settings.setValue("text/family", text_family)
+        self._settings.setValue("text/size", int(text_size))
+        self._settings.setValue("text/bold", "true" if text_bold else "false")
+        self._settings.setValue("text/align", text_align)
         self._settings.sync()
         if self._settings.status() != QSettings.Status.NoError and not self._save_failed_logged:
             # Logged once: this is called on every debounced slider change.

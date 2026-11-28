@@ -3,7 +3,7 @@
 Keeps the toolbar to one button for the whole feature: choosing the region
 (select a rectangle, or back to the full monitor) and the annotation margin
 around it (on/off, thickness, white/black, opacity). Same frameless popup
-style as the color palette; Qt.WindowType.Popup dismisses it on an outside
+style as the color palette; as a floating panel it closes on an outside
 click.
 """
 
@@ -11,12 +11,14 @@ from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QToolButton, QVBoxLayout
 
 from . import constants as C
+from .ui_widgets import make_panel, place_popup
 from . import icons
 
 
 class RegionPopup(QFrame):
     def __init__(self, overlay):
-        super().__init__(None, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        super().__init__(None)
+        make_panel(self)
         self._overlay = overlay
         self.setObjectName("Toolbar")
         self.setStyleSheet(C.TOOLBAR_STYLE)
@@ -134,6 +136,4 @@ class RegionPopup(QFrame):
     def show_below(self, widget):
         self.sync()
         self.adjustSize()
-        pos = widget.mapToGlobal(widget.rect().bottomLeft())
-        self.move(pos.x(), pos.y() + 6)
-        self.show()
+        place_popup(self, widget)

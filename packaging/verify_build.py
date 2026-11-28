@@ -41,6 +41,12 @@ REQUIRED = [
     "_internal/VCRUNTIME140.dll",
     "_internal/VCRUNTIME140_1.dll",
     "_internal/PySide6/MSVCP140.dll",
+    # The brush engine (third_party/libmypaint) and its licenses.
+    "_internal/crit_overlay/mypaint/mypaint.dll",
+    "_internal/crit_overlay/mypaint/LICENSE-libmypaint.txt",
+    "_internal/crit_overlay/mypaint/LICENSE-json-c.txt",
+    "_internal/crit_overlay/mypaint/brushes/LICENSE-mypaint-brushes.txt",
+    "_internal/crit_overlay/lucide/LICENSE.txt",
 ]
 
 MUST_NOT_SHIP = [

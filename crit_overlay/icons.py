@@ -7,6 +7,7 @@ the same glyph can be recolored for hover/checked/disabled states.
 """
 
 import math
+from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
@@ -249,7 +250,100 @@ def region_glyph(painter, color, size):
     painter.drawRect(QRectF(size * 0.34, size * 0.34, size * 0.32, size * 0.32))
 
 
+def rect_glyph(painter, color, size):
+    painter.setPen(_stroke_pen(color, size * 0.09))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawRect(QRectF(size * 0.20, size * 0.26, size * 0.60, size * 0.48))
+
+
+def ellipse_glyph(painter, color, size):
+    painter.setPen(_stroke_pen(color, size * 0.09))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawEllipse(QRectF(size * 0.18, size * 0.26, size * 0.64, size * 0.48))
+
+
+def line_glyph(painter, color, size):
+    painter.setPen(_stroke_pen(color, size * 0.09))
+    painter.drawLine(QPointF(size * 0.22, size * 0.78), QPointF(size * 0.78, size * 0.22))
+
+
+def arrow_glyph(painter, color, size):
+    painter.setPen(_stroke_pen(color, size * 0.09))
+    tip = QPointF(size * 0.78, size * 0.22)
+    painter.drawLine(QPointF(size * 0.22, size * 0.78), tip)
+    painter.drawLine(tip, QPointF(size * 0.48, size * 0.24))
+    painter.drawLine(tip, QPointF(size * 0.76, size * 0.52))
+
+
+def text_glyph(painter, color, size):
+    painter.setPen(_stroke_pen(color, size * 0.10))
+    painter.drawLine(QPointF(size * 0.24, size * 0.24), QPointF(size * 0.76, size * 0.24))
+    painter.drawLine(QPointF(size * 0.50, size * 0.24), QPointF(size * 0.50, size * 0.80))
+
+
+def bold_glyph(painter, color, size):
+    painter.setPen(_stroke_pen(color, size * 0.13))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    path = QPainterPath()
+    path.moveTo(size * 0.34, size * 0.20)
+    path.lineTo(size * 0.34, size * 0.80)
+    path.lineTo(size * 0.58, size * 0.80)
+    path.cubicTo(size * 0.76, size * 0.80, size * 0.76, size * 0.50, size * 0.56, size * 0.50)
+    path.lineTo(size * 0.34, size * 0.50)
+    path.moveTo(size * 0.56, size * 0.50)
+    path.cubicTo(size * 0.72, size * 0.50, size * 0.72, size * 0.20, size * 0.54, size * 0.20)
+    path.lineTo(size * 0.34, size * 0.20)
+    painter.drawPath(path)
+
+
+def _align_glyph(painter, color, size, align):
+    painter.setPen(_stroke_pen(color, size * 0.08))
+    for i, frac in enumerate((0.60, 0.40, 0.60, 0.32)):
+        w = size * frac
+        x = {"left": size * 0.2, "center": (size - w) / 2, "right": size * 0.8 - w}[align]
+        y = size * (0.26 + i * 0.16)
+        painter.drawLine(QPointF(x, y), QPointF(x + w, y))
+
+
+def align_left_glyph(painter, color, size):
+    _align_glyph(painter, color, size, "left")
+
+
+def align_center_glyph(painter, color, size):
+    _align_glyph(painter, color, size, "center")
+
+
+def align_right_glyph(painter, color, size):
+    _align_glyph(painter, color, size, "right")
+
+
+def select_glyph(painter, color, size):
+    # An outlined pointer: the Select/Move tool.
+    painter.setPen(_stroke_pen(color, size * 0.08))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    pointer = QPainterPath()
+    pointer.moveTo(size * 0.30, size * 0.16)
+    pointer.lineTo(size * 0.30, size * 0.78)
+    pointer.lineTo(size * 0.45, size * 0.64)
+    pointer.lineTo(size * 0.56, size * 0.86)
+    pointer.lineTo(size * 0.65, size * 0.82)
+    pointer.lineTo(size * 0.55, size * 0.60)
+    pointer.lineTo(size * 0.74, size * 0.58)
+    pointer.closeSubpath()
+    painter.drawPath(pointer)
+
+
 _GLYPHS = {
+    "select": select_glyph,
+    "text": text_glyph,
+    "bold": bold_glyph,
+    "align_left": align_left_glyph,
+    "align_center": align_center_glyph,
+    "align_right": align_right_glyph,
+    "rect": rect_glyph,
+    "ellipse": ellipse_glyph,
+    "line": line_glyph,
+    "arrow": arrow_glyph,
     "brush": brush_glyph,
     "eraser": eraser_glyph,
     "undo": undo_glyph,
@@ -267,9 +361,60 @@ _GLYPHS = {
 }
 
 
+# Lucide (https://lucide.dev, ISC; see lucide/LICENSE.txt): one consistent
+# 24 px outline icon set. Vendored SVGs from lucide-static 0.460.0, only the
+# ones used. Glyphs drawn above remain for anything Lucide doesn't cover
+# (backdrop off, hide to tray) and as a fallback.
+LUCIDE_DIR = Path(__file__).resolve().parent / "lucide"
+LUCIDE = {
+    "select": "mouse-pointer-2", "brush": "brush", "eraser": "eraser", "text": "type",
+    "rect": "square", "ellipse": "circle", "line": "slash", "arrow": "move-up-right",
+    "eyedropper": "pipette", "undo": "undo-2", "redo": "redo-2", "more": "ellipsis",
+    "bold": "bold", "align_left": "align-left", "align_center": "align-center", "align_right": "align-right",
+    "snapshot": "camera", "pass_through": "mouse-pointer-click", "hide_ui": "eye-off", "monitor": "monitor",
+    "region": "scan", "margin": "sliders-horizontal", "folder": "folder-open", "clear": "trash-2",
+    "exit": "x", "hide": "chevron-down", "settings": "settings",
+    "chevron_down": "chevron-down", "chevron_right": "chevron-right",
+    "fit": "minimize-2", "actual": "zoom-in",
+}
+LUCIDE_STROKE = 1.75  # a touch lighter than Lucide's 2, for 20 px on a dark bar
+_svg_cache = {}
+
+
+def _lucide_pixmap(file, color, size, dpr):
+    from PySide6.QtCore import QByteArray
+    from PySide6.QtSvg import QSvgRenderer
+    key = (file, color, size, dpr)
+    pm = _svg_cache.get(key)
+    if pm is not None:
+        return pm
+    svg = (LUCIDE_DIR / f"{file}.svg").read_text(encoding="utf-8")
+    svg = svg.replace("currentColor", QColor(color).name()).replace(
+        'stroke-width="2"', f'stroke-width="{LUCIDE_STROKE}"')
+    renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    pm = QPixmap(round(size * dpr), round(size * dpr))
+    pm.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    renderer.render(painter)
+    painter.end()
+    pm.setDevicePixelRatio(dpr)
+    _svg_cache[key] = pm
+    return pm
+
+
 def build_icon(name, color="#eeeeef", size=SIZE):
+    file = LUCIDE.get(name)
+    if file and (LUCIDE_DIR / f"{file}.svg").exists():
+        try:
+            icon = QIcon()
+            for dpr in (1.0, 2.0, 3.0):   # crisp at any monitor scale
+                icon.addPixmap(_lucide_pixmap(file, color, size, dpr))
+            return icon
+        except Exception:
+            pass
     pixmap, painter = _canvas(size)
-    _GLYPHS[name](painter, color, size)
+    _GLYPHS.get(name, more_glyph)(painter, color, size)
     return _finish(pixmap, painter)
 
 

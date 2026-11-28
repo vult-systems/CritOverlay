@@ -241,7 +241,7 @@ def run(opts, log_path=None, removed_env=(), unclean_sessions=()):
         tray.diagnostics_requested.connect(lambda: save_diagnostics(opts, overlay))
         tray.open_logs_requested.connect(lambda: log_path and _open_file(log_path.parent))
         tray.quit_requested.connect(lambda: quit_app("the tray menu"))
-        _wire_autostart(tray)
+        _wire_autostart(tray, overlay)
         tray.show()
     else:
         logger.warning("System tray unavailable; running without a tray icon, Esc exits")
@@ -287,6 +287,7 @@ def run(opts, log_path=None, removed_env=(), unclean_sessions=()):
         overlay.raise_()
         overlay.activateWindow()
         overlay.setFocus()
+        overlay.claim_foreground("startup")
 
     logger.info("Overlay visible=%s geometry=%s", overlay.isVisible(), overlay.geometry())
     logger.info("Entering event loop (startup %.0f ms)", (time.perf_counter() - t0) * 1000)
@@ -316,11 +317,14 @@ def _listen_for_show_requests(overlay):
     return notifier
 
 
-def _wire_autostart(tray):
+def _wire_autostart(tray, overlay=None):
     command = autostart.launch_command(portable=paths.current().portable)
 
     def refresh():
-        tray.set_autostart_checked(autostart.is_enabled(command=command))
+        enabled = autostart.is_enabled(command=command)
+        tray.set_autostart_checked(enabled)
+        if overlay is not None:
+            overlay.set_autostart_checked(enabled)
 
     def toggled(checked):
         try:
@@ -334,4 +338,6 @@ def _wire_autostart(tray):
         refresh()
 
     tray.autostart_toggled.connect(toggled)
+    if overlay is not None:
+        overlay.autostart_toggled.connect(toggled)
     refresh()

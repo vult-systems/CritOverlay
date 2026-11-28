@@ -125,7 +125,7 @@ class OverlayMonitorTests(unittest.TestCase):
 
     def test_starts_on_exactly_one_monitor_at_its_scale(self):
         self.assertTrue(self.on("laptop"))
-        self.assertTrue(self.overlay.monitor_btn.isVisibleTo(self.overlay.panel))
+        self.assertTrue(self.overlay.monitor_btn.isVisibleTo(self.overlay.more_menu))
 
     def test_toolbar_button_and_f7_cycle_monitors(self):
         o = self.overlay

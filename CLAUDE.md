@@ -34,14 +34,15 @@ Don't change these without an issue that discusses the trade-off:
 
 - **One monitor at a time.** The overlay covers exactly one monitor. Qt can't place one window accurately across monitors with different scaling (see `docs/COMPATIBILITY.md#why-one-monitor-at-a-time`). F7, the toolbar monitor button and the tray switch monitors.
 - **Pens through Windows Ink only.** Qt 6.8 removed Wintab. `--input mouse` is the fallback.
-- **Portable and self-contained.** Standard user, no installer, no registry writes, no network access, no runtimes to install. Onedir, not onefile, and no UPX. Runtime dependencies are PySide6-Essentials only.
+- **Portable and self-contained.** Standard user, no installer, no registry writes, no network access, no runtimes to install. Onedir, not onefile, and no UPX. Every dependency ships inside the build (see the dependency policy under Project rules).
 - **Startup fails loudly.** `launcher.py` stays stdlib-only, so errors before Qt loads still show a message, write a crash report and return a distinct exit code.
-- **Lives in the tray.** Esc hides when there's no capture (with a capture it discards it and starts a new selection); only the tray's Exit quits (Esc exits only when there's no tray). A saved F9 screenshot also hides, and the next show resumes that session. One copy per session. Start with Windows is a Startup-folder shortcut, not a registry value (#14).
+- **Lives in the tray.** Esc backs out one step (text edit, manipulation, selection) and otherwise hides, keeping the capture and history; it never discards a capture or switches to full-monitor drawing. Only the tray's Exit quits (Esc exits only when there's no tray). A saved F9 screenshot also hides, and the next show resumes that session. One copy per session. Start with Windows is a Startup-folder shortcut, not a registry value (#14).
 - **Captures are pixel-aligned.** A capture is cropped from a full-monitor grab at its device-pixel edges (`QScreen.grabWindow` with a sub-rect rounds the size up at fractional scales), the margin is snapped to whole image pixels, and image and margin are painted into integer device rects from one edge-rounding rule in `capture.py`. Strokes are stored in the image's own coordinates, so fit scaling never lowers export resolution.
 - **Settings carry over.** Bump `SETTINGS_VERSION` and add a migration in `config.py` rather than resetting user settings.
 
 ## Project rules
 
+- **Dependencies:** prefer a mature, well-maintained open-source library to reinventing established functionality when it meaningfully improves quality, performance or maintainability. Judge each one on licensing, portability (it must ship inside the portable build), security, maintenance, integration complexity and practical benefit, not on keeping the dependency count low. Consequential dependency decisions still need the owner's approval.
 - Docs to keep in sync: `README.md`, `docs/*.md`, `CHANGELOG.md`, `CLAUDE.md`, and `packaging/dist_extras/` (shipped to users; CRLF).
 - In `docs/COMPATIBILITY.md`, a row moves from **Assumed** to **Tested** only after someone actually runs it, and the row records the configuration.
 - Issue labels: `bug`, `enhancement`, `compatibility` (Windows/hardware/managed workstations), `documentation`, `tech-debt`, `release-blocker`, `awaiting-acceptance`.

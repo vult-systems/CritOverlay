@@ -23,6 +23,9 @@ from PySide6.QtGui import QGuiApplication, QMouseEvent
 
 from . import app as app_module
 from . import constants as C
+from . import brushes
+from . import icons
+from . import mypaint_engine
 from . import diagnostics
 from . import hotkeys
 from . import native_windows
@@ -123,6 +126,9 @@ def _run_checks(app, overlay, opts, results):
     results.check("Clear empties the canvas", len(overlay.history) == 0 and not _canvas_has_ink(overlay))
 
     _toolbar_checks(overlay, results)
+    _brush_engine_checks(overlay, results)
+    missing = [f for f in icons.LUCIDE.values() if not (icons.LUCIDE_DIR / f"{f}.svg").exists()]
+    results.check("Toolbar icons bundled (Lucide)", not missing, ", ".join(missing) or str(icons.LUCIDE_DIR))
 
     screen = QGuiApplication.primaryScreen()
     grab = screen.grabWindow(0, 0, 0, 4, 4)
@@ -138,6 +144,29 @@ def _run_checks(app, overlay, opts, results):
         results.check("Screenshot folder writable", True, str(writable))
 
     results.check("Log file location available", paths.current().log_dir is not None, str(paths.current().log_dir))
+
+
+def _brush_engine_checks(overlay, results):
+    """libmypaint is the brush engine: the DLL and every preset's brush file
+    must be bundled and load in this (frozen) process, and a stroke through
+    it must reach the canvas."""
+    results.check("Brush engine (libmypaint) loads", mypaint_engine.available(), str(mypaint_engine.DIR))
+    missing = [f for f in brushes.BRUSH_FILES if not (mypaint_engine.DIR / "brushes" / f).exists()]
+    results.check("Brush files bundled", not missing, ", ".join(missing) or f"{len(brushes.BRUSH_FILES)} brushes")
+    original = overlay.brush_preset
+    try:
+        for key in brushes.PRESETS:
+            overlay._set_brush_preset(key)
+            _draw_test_stroke(overlay)
+        ok = len(overlay.history) == len(brushes.PRESETS) and _canvas_has_ink(overlay)
+        results.check("Every brush paints", ok, ", ".join(brushes.LABELS.values()))
+        overlay._set_mode("eraser")
+        _draw_test_stroke(overlay)
+        overlay._set_mode("brush")
+        results.check("Eraser stroke commits", len(overlay.history) == len(brushes.PRESETS) + 1)
+    finally:
+        overlay.clear()
+        overlay._set_brush_preset(original)
 
 
 def _click_at(overlay, local_point):
@@ -159,11 +188,13 @@ def _toolbar_checks(overlay, results):
     results.check("Toolbar Brush/Eraser buttons switch tools", eraser and brush)
 
     original = overlay.brush_size
-    probe = original + 3 if original + 3 <= C.MAX_SIZE else original - 3
+    start = overlay.size_slider.value()
+    probe = start + 60 if start + 60 <= overlay.size_slider.maximum() else start - 60
     overlay.size_slider.setValue(probe)
-    slider_to_model = overlay.brush_size == probe and overlay.size_value_label.text() == f"{probe}px"
+    slider_to_model = (abs(overlay.brush_size - brushes.slider_to_size(probe)) < 0.01
+                       and overlay.size_value_label.text() == brushes.format_size(overlay.brush_size))
     overlay.change_size(-1)
-    key_to_slider = overlay.size_slider.value() == probe - 1
+    key_to_slider = overlay.size_slider.value() < probe
     overlay._set_size(original)
     results.check("Size slider and [ / ] keys stay in sync", slider_to_model and key_to_slider)
 
@@ -174,15 +205,18 @@ def _toolbar_checks(overlay, results):
     overlay.redo_btn.click()
     after_redo = len(overlay.history) == 1
     overlay.clear_btn.click()
-    cleared = len(overlay.history) == 0 and not overlay.undo_btn.isEnabled()
+    cleared = len(overlay.history) == 0 and overlay.undo_btn.isEnabled()  # Clear all is undoable
+    overlay.undo()
+    cleared = cleared and len(overlay.history) == 1
+    overlay.clear()
     results.check("Undo / Redo / Clear buttons", enabled and after_undo and after_redo and cleared)
 
     _click_at(overlay, overlay.panel.geometry().center())
     results.check("Clicking the toolbar doesn't draw", len(overlay.history) == 0 and overlay.current is None)
 
     total = len(QGuiApplication.screens())
-    results.check("Monitor button shown only with more than one monitor",
-                  overlay.monitor_btn.isVisibleTo(overlay.panel) == (total > 1), f"{total} monitor(s)")
+    results.check("Next-monitor item shown only with more than one monitor",
+                  overlay.monitor_btn.isVisibleTo(overlay.more_menu) == (total > 1), f"{total} monitor(s)")
 
 
 def _on_covered_monitor(overlay, widget_rect_global):

@@ -194,3 +194,135 @@ def display_adapters():
     except Exception:
         logger.debug("EnumDisplayDevicesW failed", exc_info=True)
     return out
+
+
+
+_k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_user32.GetForegroundWindow.argtypes = []
+_user32.GetForegroundWindow.restype = wintypes.HWND
+_user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+_user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+_user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+_user32.SetForegroundWindow.restype = wintypes.BOOL
+_user32.BringWindowToTop.argtypes = [wintypes.HWND]
+_user32.BringWindowToTop.restype = wintypes.BOOL
+_user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+_user32.AttachThreadInput.restype = wintypes.BOOL
+_k32.GetCurrentThreadId.argtypes = []
+_k32.GetCurrentThreadId.restype = wintypes.DWORD
+_k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+_k32.OpenProcess.restype = wintypes.HANDLE
+_k32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                            ctypes.POINTER(wintypes.DWORD)]
+_k32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+_k32.CloseHandle.argtypes = [wintypes.HANDLE]
+_k32.CloseHandle.restype = wintypes.BOOL
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+def foreground_info():
+    """(foreground hwnd, its process id, its executable name) for logs and
+    the input diagnostic. Name is "" when it can't be read."""
+    try:
+        hwnd = _user32.GetForegroundWindow()
+        pid = wintypes.DWORD(0)
+        _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        name = ""
+        handle = _k32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+        if handle:
+            try:
+                buf = ctypes.create_unicode_buffer(520)
+                size = wintypes.DWORD(len(buf))
+                if _k32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                    name = buf.value.rsplit("\\", 1)[-1]
+            finally:
+                _k32.CloseHandle(handle)
+        return int(hwnd or 0), pid.value, name
+    except Exception:
+        logger.debug("foreground_info failed", exc_info=True)
+        return 0, 0, ""
+
+
+def is_foreground(hwnd):
+    try:
+        return int(_user32.GetForegroundWindow() or 0) == int(hwnd)
+    except Exception:
+        return False
+
+
+def claim_foreground(hwnd):
+    """Make `hwnd` the foreground window. Tablet drivers (Wacom and others)
+    pick Windows Ink or mouse emulation from the foreground application's
+    settings, so until this window is foreground a pen may reach it as a
+    plain mouse, without pressure.
+
+    SetForegroundWindow is allowed while this process has the user's most
+    recent input or was just started or activated by it (hotkey, tray,
+    launch); otherwise Windows refuses silently. In that case, briefly
+    attaching to the foreground thread's input lets it through. Returns
+    True when the window is foreground afterwards."""
+    try:
+        hwnd = wintypes.HWND(int(hwnd))
+        if is_foreground(hwnd.value):
+            return True
+        if _user32.SetForegroundWindow(hwnd) and is_foreground(hwnd.value):
+            return True
+        fg = _user32.GetForegroundWindow()
+        fg_thread = _user32.GetWindowThreadProcessId(fg, None) if fg else 0
+        our_thread = _k32.GetCurrentThreadId()
+        attached = bool(fg_thread) and fg_thread != our_thread and \
+            bool(_user32.AttachThreadInput(our_thread, fg_thread, True))
+        try:
+            _user32.BringWindowToTop(hwnd)
+            _user32.SetForegroundWindow(hwnd)
+        finally:
+            if attached:
+                _user32.AttachThreadInput(our_thread, fg_thread, False)
+        return is_foreground(hwnd.value)
+    except Exception:
+        logger.debug("claim_foreground failed", exc_info=True)
+        return False
+
+
+# Pen gestures. Without these Windows holds back the start of a pen stroke
+# while it decides whether you're pressing and holding (for a right-click)
+# or flicking, then delivers the held movement at once: a hesitation at
+# pen-down and a snap. Drawing apps opt out per window.
+_TABLET_DISABLE_PRESSANDHOLD = 0x00000001
+_TABLET_DISABLE_PENTAPFEEDBACK = 0x00000008
+_TABLET_DISABLE_PENBARRELFEEDBACK = 0x00000010
+_TABLET_DISABLE_FLICKS = 0x00010000
+_TABLET_DISABLE_FLICKFALLBACKKEYS = 0x00100000
+_PEN_SERVICE_FLAGS = (_TABLET_DISABLE_PRESSANDHOLD | _TABLET_DISABLE_PENTAPFEEDBACK
+                      | _TABLET_DISABLE_PENBARRELFEEDBACK | _TABLET_DISABLE_FLICKS
+                      | _TABLET_DISABLE_FLICKFALLBACKKEYS)
+# FEEDBACK_TYPE values for SetWindowFeedbackSetting (pen visuals).
+_PEN_FEEDBACK = (2, 3, 4, 5, 6)  # barrel, tap, double tap, press-and-hold, right tap
+
+_k32.GlobalAddAtomW.argtypes = [wintypes.LPCWSTR]
+_k32.GlobalAddAtomW.restype = wintypes.ATOM
+_user32.SetPropW.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.HANDLE]
+_user32.SetPropW.restype = wintypes.BOOL
+
+
+def disable_pen_gestures(hwnd):
+    """Turn off press-and-hold, flicks and the pen feedback visuals for
+    `hwnd`, so pen input is delivered as it happens. Returns True when the
+    window property was set."""
+    ok = False
+    try:
+        atom = _k32.GlobalAddAtomW("MicrosoftTabletPenServiceProperty")
+        if atom:
+            ok = bool(_user32.SetPropW(wintypes.HWND(int(hwnd)), ctypes.c_wchar_p(atom),
+                                       wintypes.HANDLE(_PEN_SERVICE_FLAGS)))
+    except Exception:
+        logger.debug("MicrosoftTabletPenServiceProperty failed", exc_info=True)
+    try:
+        fn = _user32.SetWindowFeedbackSetting  # Windows 8+
+        fn.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.DWORD, wintypes.UINT, ctypes.c_void_p]
+        fn.restype = wintypes.BOOL
+        off = wintypes.BOOL(False)
+        for feedback in _PEN_FEEDBACK:
+            fn(wintypes.HWND(int(hwnd)), feedback, 0, ctypes.sizeof(off), ctypes.byref(off))
+    except Exception:
+        logger.debug("SetWindowFeedbackSetting failed", exc_info=True)
+    return ok
