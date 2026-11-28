@@ -90,6 +90,9 @@ exercises the toolbar and pass-through (see `crit_overlay/selftest.py`).
 | Qt 6 DCC apps on the lab image | Maya 2025, Houdini 20.5, Nuke 15 setting `QT_PLUGIN_PATH` | Variables are cleared at startup; tested with a fake plugin, not a real Qt 6 install |
 | Drawing region with a real pen | | Selection and drawing go through the same input paths as normal strokes (tested with synthetic events); real pen use is on the manual checklist |
 | Region screenshot on Windows 10 | | Uses the same `QScreen.grabWindow` call as the existing full-monitor screenshot, with a sub-rectangle |
+| Centered capture with a real pen | | Selection, Space+drag and strokes go through the same input paths as before (unit-tested with synthetic mouse and pen events on the fake 150% + 100% monitors, including Space+pen panning and a pen release over the toolbar); real pen use is manual checklist item 14 |
+| Capture edges at fractional scaling | | Unit-tested at 150% with an odd-sized selection, at a fit scale below 100%, with a 125% capture on a 150% monitor, and in the export: every pixel either side of each edge is image or margin. `QScreen.grabWindow` rounding up a sub-rect's size was measured on a real 150% monitor (Qt 6.8.3); the capture crops a full-monitor grab instead. Not yet checked visually on 175%/200% hardware |
+| F9 opens the viewer, then Explorer in front | | From the code: `os.startfile`, then `explorer /select` 1.2 s later, with `AllowSetForegroundWindow` before each. Unit tests check the order with the launches mocked; whether Explorer actually ends up in front is manual checklist item 14 |
 | Building with Python 3.12 | | Lock installs (all wheels pure Python or abi3); only 3.13 actually built |
 
 ## Known limitations (v1.5.0)
@@ -107,7 +110,9 @@ they are; each is either by design or tracked for after v1.5.0 (#19).
 | Tray icon hidden on Windows 11 | New tray icons go to the hidden-icons overflow (^) until dragged onto the taskbar. Ctrl+Alt+D works either way. Seen on the test machine. | #19 |
 | Tray notifications can be suppressed | The "hotkey already in use" and "still running" notices are Windows notifications; with notifications or Do Not Disturb off, only the log records a hotkey conflict. The notices weren't seen on screen during testing. | #19 |
 | Upgrading while it runs | Starting a new version while an older copy is running only brings the old copy back. Exit from the tray first. From the code. | #19 |
-| Tray > Screenshot while hidden | Saves the monitor without the annotations, since the overlay isn't on screen. With a drawing region set, the region screenshot includes them. Show the overlay first. From the code; same as v1.4.2 for the full-monitor case. | #19 |
+| Tray > Screenshot while hidden | With a capture, the saved image includes the annotations (it's composed from the layers). Without one, it saves the monitor without them, since the overlay isn't on screen; show the overlay first. From the code; same as v1.4.2 for the full-monitor case. | #19 |
+| Capturing discards full-monitor drawings | Dragging a new area replaces whatever was drawn, including drawings made on the full monitor, with no undo. Save with F9 first. By design (#23). | #23 |
+| No live drawing region | Area selection always captures; the live region from rc.2 (#10) can't be set from the UI. Its code remains, and `--selftest` still checks that path on every monitor rather than the capture. | #26 |
 | Hotkey while an elevated app has focus | Untested. Use the tray icon if Ctrl+Alt+D doesn't respond there. | #4 item 15 |
 | Startup watchdog exit code | A launch stopped by the watchdog exits with an arbitrary code (low byte 1). The next launch's message and `faulthandler.log` are what to go by. | #19 |
 | Python 3.9 source runs | Still work for old lab installs, but 3.9 gets no security fixes. The release build bundles 3.13. | #8 |
@@ -153,13 +158,21 @@ a person at the machine, and they're the release gate. Record the machine
 13. Upgrade path: on a machine with v1.4.2 settings, confirm brush
     settings carry over.
 
-**Drawing region** (#10)
-14. With the pen, press R and drag a region over an image on each monitor
-    (including a scaled one), then draw inside, across the edge, and in the
-    margin. Changing the margin's thickness, color or opacity turns it on
-    and updates it while dragging (#13). Strokes stop at the margin's
-    outer edge and can't start outside. F9 saves only region plus margin, with no desktop in the
-    margin. Esc during a selection cancels it without closing the app.
+**Centered capture** (#23; replaces the drawing-region check from rc.2)
+14. On each monitor (including a scaled one), with the pen: drag an area
+    over an image. It's centered with the desktop dimmed around it. Draw
+    on the image and in the margin, and check pressure. Changing the
+    margin's thickness, color or opacity turns it on and updates it while
+    dragging (#13); thickness recenters it, and there's no seam along any
+    edge or corner, also with the margin translucent. Hold Space and drag
+    with the pen and with the mouse: image, margin and strokes move
+    together. Capture nearly the whole monitor with a thick margin: it
+    shrinks to fit, and the saved PNG is still full resolution. F8 shows
+    only the strokes; F8 again brings the capture back. F9: the overlay
+    hides, the image opens in the default viewer, then Explorer opens in
+    front with the file selected. Ctrl+Alt+D brings back the same capture
+    with undo working. Esc discards it and starts a new selection; Esc
+    again hides. F7 with a capture centers it on the next monitor.
 
 **Tray and hotkey** (#14)
 15. On a managed lab machine: Esc hides, Ctrl+Alt+D brings it back from
@@ -167,7 +180,8 @@ a person at the machine, and they're the release gate. Record the machine
     and tray > Exit quits. Tick Start with Windows, log off and on: it
     starts hidden in the tray (or record that the profile resets the
     Startup folder). Check the tray notification when another app owns
-    Ctrl+Alt+D.
+    Ctrl+Alt+D. With the overlay hidden and no capture, tray > Screenshot,
+    then show it again: the toolbar is there (#25).
 
 ## Automated release check
 

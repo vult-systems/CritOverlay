@@ -70,25 +70,45 @@ If it does happen:
    report.
 3. Try `--screens primary`.
 
-## Drawing region
+## Centered capture
 
-**No margin around the selected area.** The margin is off until you turn it
-on in the region menu ("Margin: on") or change its thickness, color or
-opacity. Its controls are greyed out until an area is selected. A margin
-also can't extend past the monitor edge, so a region touching the edge has
-no margin on that side.
+**It asks for an area every time it appears.** That's the capture workflow.
+Drag a rectangle to capture it, or click once to draw over the whole
+monitor. After an F9 screenshot, Ctrl+Alt+D comes back to the saved session
+instead.
 
-**Strokes don't start, or stop partway, in part of the screen.** A drawing
-region is set: drawing is limited to it and its margin (the dashed frame).
-Press R and click once, or choose *Full monitor* in the toolbar's region
-menu. Strokes that were cut off reappear in full.
+**My full-monitor drawing disappeared after I captured an area.**
+Capturing replaces whatever was drawn before, including full-monitor
+drawings. Save with F9 before capturing; there's no undo for it.
 
-**Esc didn't close the app.** It was cancelling an area selection. Press
-Esc again to exit.
+**The capture vanished when I pressed F8.** Pass-through hides the image
+and margin so you can see the apps you're clicking on. Your strokes stay.
+F8 again (or the badge) brings the capture back.
 
-**The screenshot is smaller than the monitor.** With a region set, F9 saves
-just the region and its margin. Go back to the full monitor for a
-whole-monitor screenshot.
+**No margin around the capture.** The margin is off until you turn it on in
+the region menu ("Margin: on") or change its thickness, color or opacity.
+Its controls are greyed out until there's a capture.
+
+**The capture looks smaller than what I selected.** With its margin it
+didn't fit on the monitor, so it's shown scaled down (the region menu says
+"shown at N%"). The saved image is still full resolution. A thinner margin
+gives it more room.
+
+**Esc threw my notes away.** With a capture, Esc discards it and starts a
+new selection. Save with F9 first; to step away and keep it, use the
+toolbar's hide button, the tray icon or Ctrl+Alt+D instead.
+
+**Space doesn't move the capture.** The overlay needs keyboard focus: click
+the capture once, then hold Space and drag.
+
+**Strokes don't start, or stop partway, in part of the screen.** Drawing is
+limited to the capture and its margin. Choose *Full monitor* in the
+toolbar's region menu (or press R and click once) to draw anywhere; that
+discards the capture.
+
+**The screenshot is smaller than the monitor.** With a capture, F9 saves
+just the image and its margin. Go to the full monitor for a whole-monitor
+screenshot.
 
 ## Pen and tablet problems
 
@@ -105,7 +125,10 @@ whole-monitor screenshot.
 |---|---|
 | "Saved to C:\Users\...\AppData\Local\CritOverlay\Screenshots" instead of Pictures | Pictures wasn't writable: Controlled Folder Access, or Pictures redirected to an unavailable share. Set `screenshot_dir` or ask IT to allow the app. |
 | "Screenshot failed, see log" | No candidate folder was writable; the log lists every folder tried |
+| The image doesn't open after saving | No default app for .png, or launching it is blocked by policy. Explorer still opens with the file selected, and the file is saved |
 | Explorer doesn't open after saving | Explorer launching is blocked by policy; the file is still saved |
+| Explorer opens behind the image viewer, or only flashes in the taskbar | Explorer opens 1.2 s after the viewer so it lands in front. A slow-starting viewer, or a click elsewhere in that time, can put it behind. Click its taskbar button |
+| The overlay vanished after F9 | It hides to the tray after a successful save. Ctrl+Alt+D brings the same session back. If the save fails, it stays up and says so |
 | Screenshot is black | Some screen-capture-blocking or DRM software blanks captures; not fixable in the app |
 
 ## Safe mode

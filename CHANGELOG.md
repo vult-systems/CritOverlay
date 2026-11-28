@@ -1,5 +1,63 @@
 # Changelog
 
+## Unreleased
+
+The v1.5.0 feature freeze was reopened for the centered capture workflow
+(#23).
+
+**Added**
+
+- **Centered capture** (#23). The overlay now starts in area selection,
+  like a snipping tool. A dragged area is captured as a still image and
+  centered on the monitor as a drawing workspace, with the desktop dimmed
+  around it; a plain click gives the existing live full-monitor drawing.
+  Space+drag moves the capture with its margin and strokes. A capture too
+  big for the monitor with its margin is shown scaled to fit; strokes are
+  kept in the image's own coordinates, so the export keeps the capture's
+  full resolution and the brush keeps its on-screen size. Changing the
+  margin thickness recenters it, and F7 recenters it on the next monitor.
+  The image and margin share whole-pixel edges at any scaling: captures are
+  cropped from a full-monitor grab, because `QScreen.grabWindow` with a
+  sub-rectangle rounds its size up at fractional scaling (401 x 301 logical
+  px at 150% came back 602 x 452 with Qt 6.8.3), which put a seam of
+  desktop pixels between image and margin.
+- **F9 on a capture saves the image, margin and strokes** (#23), composed
+  from the layers at the capture's resolution, with no toolbar, cursor or
+  desktop.
+
+**Changed**
+
+- **Area selection captures instead of setting a live drawing region**
+  (#23). R and the region button's *Capture area* start a capture; the live
+  drawing region from rc.2 (#10) can no longer be set from the UI (its code
+  is tracked in #26). The region button keeps the margin controls and *Full
+  monitor*.
+- **Capturing discards drawings made on the full monitor**, and a new
+  capture replaces the previous one with its strokes.
+- **Esc with a capture discards it and starts a new selection.** Without a
+  capture, Esc hides to the tray, also during a selection (it used to only
+  cancel the selection).
+- **A saved F9 screenshot hides the overlay to the tray** (#23) with the
+  capture, strokes, margin and undo history kept, opens the image in the
+  default viewer, then opens Explorer with the file selected 1.2 s later so
+  it lands in front (`AllowSetForegroundWindow`). Ctrl+Alt+D resumes the
+  session instead of starting a new selection. A failed save leaves the
+  overlay up and reports it. Without a tray icon the overlay stays up.
+- **Pass-through (F8) with a capture** shows only your strokes, so you can
+  see what you're clicking on underneath.
+- The full-monitor F9 grab also hides the hover tip, open popups, the
+  pass-through badge and any selection outline.
+
+**Fixed**
+
+- **Tray > Screenshot while the overlay was hidden left the toolbar
+  hidden** when the overlay came back (#25). The toolbar's visibility was
+  read with `isVisible()`, which is false for every child of a hidden
+  window.
+- The drawing-region margin is filled as one shape instead of four bands,
+  which left part-filled pixels where the bands met at fractional scaling
+  (#24). This affects the region code path still used by `--selftest`.
+
 ## v1.5.0-rc.4 (pre-release)
 
 Fourth release candidate for v1.5.0: the app now lives in the tray (#14).

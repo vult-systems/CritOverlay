@@ -46,7 +46,7 @@ class RegionPopup(QFrame):
         layout.addWidget(caption)
 
         w, h = row()
-        self.select_btn = text_button("Select area (R)", w)
+        self.select_btn = text_button("Capture area (R)", w)
         self.full_btn = text_button("Full monitor", w, checkable=True)
         self.select_btn.clicked.connect(self._select)
         self.full_btn.clicked.connect(self._full)
@@ -100,7 +100,8 @@ class RegionPopup(QFrame):
         """Reflect the overlay's current state (it can change by hotkey or a
         monitor switch while the popup is closed)."""
         o = self._overlay
-        self.full_btn.setChecked(o.region is None)
+        has_area = o.region is not None or o.capture is not None
+        self.full_btn.setChecked(not has_area)
         self.margin_btn.blockSignals(True)
         self.margin_btn.setChecked(o.margin_enabled)
         self.margin_btn.blockSignals(False)
@@ -108,7 +109,7 @@ class RegionPopup(QFrame):
         # A margin needs an area to surround; don't offer controls that
         # can't show anything yet.
         for widget in (self._margin_row, self._size_row, self._opacity_row):
-            widget.setEnabled(o.region is not None)
+            widget.setEnabled(has_area)
         self.white_btn.setChecked(o.margin_color == "white")
         self.black_btn.setChecked(o.margin_color == "black")
         for slider, label, value, text in (
@@ -120,7 +121,11 @@ class RegionPopup(QFrame):
             slider.setValue(value)
             slider.blockSignals(False)
             label.setText(text)
-        if o.region is None:
+        if o.capture is not None:
+            s = o.capture.size()
+            shown = "" if o.capture.scale >= 1.0 else f", shown at {round(o.capture.scale * 100)}%"
+            self.note.setText(f"Capture {round(s.width())} x {round(s.height())}{shown}")
+        elif o.region is None:
             self.note.setText("Select an area to add a margin around it")
         else:
             r = o.region

@@ -201,7 +201,9 @@ def run(opts, log_path=None, removed_env=(), unclean_sessions=()):
     icon = build_app_icon()
     app.setWindowIcon(icon)
 
-    overlay = Overlay(screen_mode=opts.screens, input_mode=opts.input, screenshot_dir=opts.screenshot_dir)
+    # Self-test draws directly, so it starts on the full monitor.
+    overlay = Overlay(screen_mode=opts.screens, input_mode=opts.input, screenshot_dir=opts.screenshot_dir,
+                      select_on_show=not opts.selftest)
     overlay.setWindowIcon(icon)
 
     extra = [f"Cleared env: {name}={value}" for name, value in removed_env]

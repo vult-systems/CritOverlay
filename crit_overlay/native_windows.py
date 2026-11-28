@@ -99,6 +99,25 @@ def is_window_visible(hwnd):
     return bool(_user32.IsWindowVisible(wintypes.HWND(hwnd)))
 
 
+_ASFW_ANY = -1
+
+
+def allow_foreground_handoff():
+    """Let the next window another process opens take the foreground
+    (AllowSetForegroundWindow(ASFW_ANY)). Only works while this process
+    may set the foreground itself, e.g. it received the last input event,
+    which is the case right after the user presses F9. Without it Windows
+    may open Explorer behind other windows and only flash its taskbar
+    button. Returns True on success."""
+    try:
+        _user32.AllowSetForegroundWindow.argtypes = [wintypes.DWORD]
+        _user32.AllowSetForegroundWindow.restype = wintypes.BOOL
+        return bool(_user32.AllowSetForegroundWindow(wintypes.DWORD(_ASFW_ANY & 0xFFFFFFFF)))
+    except Exception:
+        logger.debug("AllowSetForegroundWindow failed", exc_info=True)
+        return False
+
+
 def trim_working_set():
     """Let Windows page out what this process isn't using right now. Called
     when the overlay hides to the tray: nothing is lost (pages come back on
