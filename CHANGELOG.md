@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+**Build**
+
+- CI runs once per change instead of up to three times. Branch pushes no
+  longer trigger it (pull requests and `main` do), and a push to `main`
+  skips validation when its pull request already passed lint, tests and
+  both builds on the identical tree. Jobs run only when the changed files
+  can affect them: docs-only changes get a new Markdown link check
+  (`packaging/check_docs.py`), test-only changes skip the builds. A single
+  `ci` job is now the required check. pip downloads are cached.
+- The release workflow checks the tag, `APP_VERSION`, changelog section and
+  that the tag is on `main` before building. It reuses a CI build of the
+  same commit when one exists, builds once on windows-2025 when the tree
+  was already fully validated, and runs all of CI otherwise.
+- Fixed a broken link to the release checklist in `docs/BUILDING.md`.
+
 ## v1.5.0-rc.5 (pre-release)
 
 Fifth release candidate for v1.5.0: the centered capture workflow (#23),

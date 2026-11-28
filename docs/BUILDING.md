@@ -82,14 +82,32 @@ Runs automatically at the end of the build:
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs on every push and pull request:
+`.github/workflows/ci.yml` runs on pull requests, pushes to `main`, and by
+hand (Actions > CI > Run workflow, which runs everything). Jobs run only when
+the changed files can affect them:
 
-| Job | What |
-|---|---|
-| lint | pyflakes (hash-pinned in `packaging/requirements-lint.txt`) and a compile with warnings as errors |
-| test | Unit tests on windows-2025 and windows-2022: Python 3.13.17 and 3.12 with the locked PySide6 6.8.3, and Python 3.9 with PySide6 6.7.3 (oldest source configuration) |
-| build | `packaging\build.bat` itself (with `CRIT_PYTHON` and `CRIT_NO_PAUSE=1`) on windows-2025 and windows-2022: locked toolchain, static DLL audit, self-tests, zip and `SHA256SUMS.txt`, uploaded as artifacts |
-| reproducibility | Compares every file in the two runners' zips; only `build_info.json` (build host) should differ. Informational only; it doesn't fail the run. |
+| Job | What | Runs when the change touches |
+|---|---|---|
+| docs | `packaging/check_docs.py`: relative links and `#anchors` in every Markdown file | anything |
+| lint | pyflakes (hash-pinned in `packaging/requirements-lint.txt`) and a compile with warnings as errors | anything outside `docs/`, top-level `*.md` and `LICENSE` |
+| test | Unit tests on windows-2025 and windows-2022: Python 3.13.17 and 3.12 with the locked PySide6 6.8.3, and Python 3.9 with PySide6 6.7.3 (oldest source configuration) | as lint |
+| build | `packaging\build.bat` itself (with `CRIT_PYTHON` and `CRIT_NO_PAUSE=1`) on windows-2025 and windows-2022: locked toolchain, static DLL audit, self-tests, zip and `SHA256SUMS.txt`, uploaded as artifacts. Starts after lint and tests pass. | as lint, except changes only under `tests/` |
+| reproducibility | Compares every file in the two runners' zips; only `build_info.json` (build host) should differ. Informational only; it doesn't fail the run. | after both builds |
+| ci | The required check. Fails if change detection or any job that ran failed or was cancelled. | always |
+
+Pull requests are compared with their base, and pushes to `main` with the
+previous `main` commit. Unrecognised paths count as code, so they get the
+full run.
+
+When lint, every test and both builds pass, `ci` uploads a small
+`ci-validated-<tree hash>` artifact (kept 90 days). A push to `main` whose
+tree has one (the normal case for a pull request merged without `main`
+moving underneath it) runs nothing further, because those exact files were
+already tested. Only records from this repository's own branches count.
+
+pip downloads are cached per lock file. The cache only saves downloads:
+locked installs still check every wheel against its hash. A newer push to a
+pull request cancels the older run; runs on `main` are never cancelled.
 
 The hosted runners are Windows Server 2022 and 2025, single monitor at
 100%. CI therefore can't stand in for client Windows 10/11, mixed-DPI
@@ -104,13 +122,23 @@ monitors, pens, or managed lab machines. That stays a manual gate (below).
    commit to `main` through a pull request with CI green.
 2. Tag that commit on `main` and push the tag:
    `git tag -a v1.5.0-rc.2 -m "..."` and `git push origin v1.5.0-rc.2`.
-3. `.github/workflows/release.yml` runs the full CI. If every job passes,
-   it checks that the tag matches `APP_VERSION`, that the tag is `vX.Y.Z`
-   or `vX.Y.Z-rc.N`, that the changelog has the section, and the zip's
-   checksum. Then it creates a **draft** release with the windows-2025
-   zip, `SHA256SUMS.txt`, and the changelog section plus hashes as notes.
-   Release candidates are drafted as pre-releases. If any check fails,
-   no release is created.
+3. `.github/workflows/release.yml` first checks that the tag matches
+   `APP_VERSION`, that it is `vX.Y.Z` or `vX.Y.Z-rc.N`, that the tagged
+   commit is on `main`, and that the changelog has the section. It then
+   gets the windows-2025 release zip from the first of:
+   - **reuse:** a successful CI run on `main` (a push that wasn't skipped,
+     or a manual run) already built that exact commit, so source, version
+     and toolchain lock are identical;
+   - **build:** a pull request fully validated the commit's tree, so it
+     runs `build.bat` once on windows-2025, with its audit and self-tests;
+   - **full:** otherwise, all of CI.
+
+   It checks that the zip was built as that version and verifies its
+   checksum, then creates a **draft** release with the zip,
+   `SHA256SUMS.txt`, and the changelog section plus hashes as notes.
+   Release candidates are drafted as pre-releases. If any check fails, no
+   release is created. A pull request that changes `release.yml` runs it as
+   a dry run: the build and the checks, without a draft.
 4. Edit the draft notes (Verified / Not yet verified / known issues) and
    publish it by hand.
    - **Release candidate:** publish as a pre-release, without making it
@@ -142,7 +170,7 @@ it and installs with `--no-index`. The hashes still have to match.
    PyInstaller, setuptools).
 2. `py -3.13 packaging\update_lock.py` regenerates the lock with hashes.
 3. Run `packaging\build.bat` (it reinstalls the venv from the new lock).
-4. Run the [release checklist](COMPATIBILITY.md#release-checklist) and
+4. Run the [release checklist](COMPATIBILITY.md#manual-validation-required-before-release) and
    update the Tested table.
 
 The build Python range is `SUPPORTED_BUILD_PYTHONS` in
