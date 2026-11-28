@@ -27,4 +27,4 @@ Out of scope: vulnerabilities in Qt, PySide6, Python or Windows themselves (repo
 ## Safeguards built in
 
 - Standard user only: no installer, no administrator rights, no registry writes and no network access. Start with Windows is a shortcut in the user's Startup folder.
-- Release builds come from CI on a tag, with a hash-locked toolchain, and ship with `SHA256SUMS.txt`. Locally built zips are never uploaded.
+- Release builds come from CI, built from the tagged commit with a hash-locked toolchain, and ship with `SHA256SUMS.txt`. Locally built zips are never uploaded.

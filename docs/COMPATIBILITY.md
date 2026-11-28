@@ -191,8 +191,9 @@ On a machine with several monitors, the build's self-test also tours every
 monitor.
 
 CI (`.github/workflows/ci.yml`) runs lint, the unit tests, and
-`build.bat` on Windows Server 2022 and 2025 runners for every push and pull
-request. A version tag gets a draft release only if all of that passes (see
+`build.bat` on Windows Server 2022 and 2025 runners for every pull request
+that changes code or packaging. A version tag gets a draft release only if
+that commit's tree passed all of it (see
 [BUILDING.md](BUILDING.md#releasing)). CI runners are single-monitor
 servers without pens, so they don't replace the manual checklist above.
 That checklist remains the gate for a stable release.

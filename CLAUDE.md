@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Crit Overlay is a transparent drawing overlay for Windows 10/11. It is built with PySide6 and shipped as a self-contained PyInstaller onedir build. These standards are the default workflow for all work in this repo.
+Crit Overlay is a transparent drawing overlay for Windows 10/11. It is built with PySide6 and shipped as a self-contained PyInstaller onedir build, released as a zip from CI. The global standards apply; this file holds what's specific to this repo and wins where they differ.
 
 ## Commands
 
@@ -9,6 +9,7 @@ python -m unittest discover -s tests -t .                  # unit tests (offscre
 python -m pip install --require-hashes --only-binary=:all: -r packaging/requirements-lint.txt
 python -m pyflakes crit_overlay packaging tests             # lint, as CI runs it
 python -W error -m compileall -q -f crit_overlay packaging tests
+python packaging/check_docs.py                              # Markdown links and anchors
 python -m crit_overlay --selftest                           # real run from source; exit 0 = pass
 packaging\build.bat                                         # locked build + verification + zip + SHA256SUMS
 ```
@@ -19,14 +20,13 @@ packaging\build.bat                                         # locked build + ver
 
 ## CI
 
-- `.github/workflows/ci.yml` runs on every push and PR:
-  - lint (pyflakes and compileall with warnings as errors);
-  - unit tests on windows-2025/2022 with Python 3.13.17 and 3.12 against the locked PySide6, and Python 3.9 with PySide6 6.7.3;
-  - `packaging\build.bat` on both runners, including self-tests, with artifacts uploaded;
-  - an informational file-by-file reproducibility comparison.
-- `.github/workflows/release.yml` runs on `v*` tags. It reruns CI, then creates a **draft** release. Changes to it are dry-run on their PR.
-- Workflows call `build.bat`/`build.py` rather than copying build steps into YAML.
-- Actions are pinned to commit SHAs, with the version in a comment. Tool versions are hash-pinned in `packaging/requirements-*.txt`.
+- `.github/workflows/ci.yml` runs on pull requests, pushes to `main` and by hand. The required check is `ci`. What runs depends on the changed files:
+  - docs only (`docs/`, top-level `*.md`, `LICENSE`): the docs link check;
+  - `tests/` also: lint and the unit tests (windows-2025/2022, Python 3.13.17 and 3.12 with the locked PySide6, Python 3.9 with PySide6 6.7.3);
+  - anything else also: `packaging\build.bat` with self-tests on both runners, plus an informational reproducibility comparison.
+  - A push to `main` reruns nothing when its pull request fully validated the identical tree (recorded as a `ci-validated-<tree>` artifact).
+- `.github/workflows/release.yml` runs on `v*` tags and creates a **draft** release. It reuses a CI build of the same commit if one exists, builds once if the tree was fully validated, and otherwise runs all of CI. Changes to it are dry-run on their PR.
+- Workflows call `build.bat`/`build.py` rather than copying build steps into YAML. Actions are pinned to commit SHAs; tool versions are hash-pinned in `packaging/requirements-*.txt`.
 
 ## Design decisions to preserve
 
@@ -34,59 +34,26 @@ Don't change these without an issue that discusses the trade-off:
 
 - **One monitor at a time.** The overlay covers exactly one monitor. Qt can't place one window accurately across monitors with different scaling (see `docs/COMPATIBILITY.md#why-one-monitor-at-a-time`). F7, the toolbar monitor button and the tray switch monitors.
 - **Pens through Windows Ink only.** Qt 6.8 removed Wintab. `--input mouse` is the fallback.
-- **Portable and self-contained.** Standard user, no installer, no registry writes, no network access, no runtimes to install. Onedir, not onefile, and no UPX.
+- **Portable and self-contained.** Standard user, no installer, no registry writes, no network access, no runtimes to install. Onedir, not onefile, and no UPX. Runtime dependencies are PySide6-Essentials only.
 - **Startup fails loudly.** `launcher.py` stays stdlib-only, so errors before Qt loads still show a message, write a crash report and return a distinct exit code.
 - **Lives in the tray.** Esc hides when there's no capture (with a capture it discards it and starts a new selection); only the tray's Exit quits (Esc exits only when there's no tray). A saved F9 screenshot also hides, and the next show resumes that session. One copy per session. Start with Windows is a Startup-folder shortcut, not a registry value (#14).
 - **Captures are pixel-aligned.** A capture is cropped from a full-monitor grab at its device-pixel edges (`QScreen.grabWindow` with a sub-rect rounds the size up at fractional scales), the margin is snapped to whole image pixels, and image and margin are painted into integer device rects from one edge-rounding rule in `capture.py`. Strokes are stored in the image's own coordinates, so fit scaling never lowers export resolution.
 - **Settings carry over.** Bump `SETTINGS_VERSION` and add a migration in `config.py` rather than resetting user settings.
 
-## Change discipline
+## Project rules
 
-- Keep changes small and on-task. Don't refactor unrelated code, add dependencies, or build abstractions for hypothetical needs.
-- Existing behaviour and UI stay unless an issue says otherwise.
-- Every new dependency must justify itself. Runtime dependencies are PySide6-Essentials only.
-- Keep docs in sync with the code in the same change. That covers `README.md`, `docs/*.md`, `CHANGELOG.md`, `CLAUDE.md`, and `packaging/dist_extras/` (shipped to users; CRLF).
+- Docs to keep in sync: `README.md`, `docs/*.md`, `CHANGELOG.md`, `CLAUDE.md`, and `packaging/dist_extras/` (shipped to users; CRLF).
 - In `docs/COMPATIBILITY.md`, a row moves from **Assumed** to **Tested** only after someone actually runs it, and the row records the configuration.
+- Issue labels: `bug`, `enhancement`, `compatibility` (Windows/hardware/managed workstations), `documentation`, `tech-debt`, `release-blocker`, `awaiting-acceptance`.
+- An issue stays open until its fix is verified where it was reported. Outstanding hardware or lab-machine checks go into the acceptance issue (#4).
 
-## Issues, branches and commits
+## Versioning and releases
 
-- Track bugs, features and tech debt as GitHub Issues. Search existing issues first to avoid duplicates.
-  - Labels: `bug`, `enhancement`, `compatibility` (Windows/hardware/managed workstations), `documentation`.
-- When work touches an issue, comment with:
-  - the root cause, as checked against the code (correct the issue's theory if it was wrong);
-  - what was implemented, with commit hashes;
-  - what was verified and how;
-  - what is still unverified.
-- **Never close an issue, or mark a fix resolved, until the fix is verified** in the environment where it was reported. Hardware or lab-machine checks still outstanding mean it stays open and the check goes into the acceptance issue.
-- Work on a branch and open a PR that references its issues.
-  - Merge only when every CI check is green, using a merge commit so the tested, focused commits land unchanged.
-  - Confirm CI passes on `main` after merging.
-- Commits are focused (one concern each), descriptive (what and why), and reference issues with `Refs #N`.
-  - Use `Fixes #N` only when the fix is verified: merging to `main` closes the issue.
-  - Each commit should leave the app importable and runnable.
-
-## Versioning and changelog
-
-- Semantic versioning. The version lives only in `APP_VERSION` in `crit_overlay/constants.py`. The spec and `build.py` read it from there.
-- Tags are `vX.Y.Z`, with release candidates as `vX.Y.Z-rc.N`. Only tag commits on `main`. Don't move or delete published tags.
-- `CHANGELOG.md` is newest first. New work goes under `## Unreleased`, grouped under **Changed / Added / Fixed / Settings / Build** as needed.
-  - The release commit renames that section to `## vX.Y.Z` or `## vX.Y.Z-rc.N`.
-  - A stable release after RCs gets its own `## vX.Y.Z` section. The release workflow takes the draft notes from it and fails without it.
-  - Entries are concise and technical: user-visible effect plus root cause, with issue numbers.
-
-## Releasing
-
-Full procedure: `docs/BUILDING.md#releasing`.
-
-1. Before release: CI is green on `main`. Run a local `packaging\build.bat` on multi-monitor hardware and read its log for warnings.
-2. The release commit (via PR) bumps `APP_VERSION` and renames the changelog section.
-3. Push an annotated tag `vX.Y.Z` or `vX.Y.Z-rc.N` on that commit.
-   - `release.yml` reruns all of CI. It creates a **draft** only if everything passes, the tag matches `APP_VERSION` and the format, the changelog section exists, and the checksum verifies.
-   - Assets are the CI-built `CritOverlay-vX.Y.Z-win64.zip` and `SHA256SUMS.txt`. Never upload locally built zips, because they differ from CI builds in the host-copied UCRT DLLs.
-4. Edit the draft notes (changes, **Verified**, **Not yet verified**, known issues, SHA-256), then publish it by hand.
-   - **Use a release candidate (pre-release, not Latest) whenever hardware or environment validation is outstanding.**
-   - Publish a stable release only after the manual acceptance checklist passes (`docs/COMPATIBILITY.md` > "Manual validation required before release", tracked as an issue). CI cannot substitute for it.
-5. Reproducible builds: the toolchain is hash-locked in `packaging/requirements-build.txt`; change it only via `packaging/update_lock.py`. Builds use Python 3.12–3.13 (`SUPPORTED_BUILD_PYTHONS`; CI pins `BUILD_PYTHON`).
+- The version lives only in `APP_VERSION` in `crit_overlay/constants.py`. `CHANGELOG.md` groups entries under **Changed / Added / Fixed / Settings / Build**; the release commit renames `## Unreleased` to `## vX.Y.Z` or `## vX.Y.Z-rc.N`, and the release workflow takes the draft notes from that section.
+- Assets are the CI-built `CritOverlay-vX.Y.Z-win64.zip` and `SHA256SUMS.txt`. Never upload locally built zips: they differ from CI builds in the host-copied UCRT DLLs.
+- Use a release candidate whenever hardware or environment validation is outstanding. Publish a stable release only after the manual checklist (`docs/COMPATIBILITY.md#manual-validation-required-before-release`, tracked as an issue) passes. Before any release, run a local `packaging\build.bat` on multi-monitor hardware and read its log.
+- The toolchain is hash-locked in `packaging/requirements-build.txt`; change it only via `packaging/update_lock.py`. Builds use Python 3.12–3.13 (`SUPPORTED_BUILD_PYTHONS`; CI pins `BUILD_PYTHON`).
+- Procedure: `docs/BUILDING.md#releasing`.
 
 ## Feature freeze: v1.5.0
 
@@ -102,5 +69,5 @@ The owner reopened the freeze once, on 2026-11-27, for the centered capture work
 
 ## Current state
 
-- **Repository settings:** `main` is protected: PR required (0 approvals), `lint`, the four `test` jobs and both `build` jobs required (`reproducibility` is informational), conversations resolved, no force-push or deletion. Merged branches are deleted automatically. Private vulnerability reporting is on (`SECURITY.md`). Renaming a CI job means updating the required checks.
+- **Repository settings:** `main` is protected: PR required (0 approvals), the `ci` check required, conversations resolved, no force-push or deletion. Merged branches are deleted automatically. Private vulnerability reporting is on (`SECURITY.md`). Renaming the `ci` job means updating the required check.
 - **Releases:** v1.4.2 is the stable release. v1.5.0-rc.5 is the current pre-release and the frozen acceptance baseline, pending #4. It supersedes rc.4 (tray, hotkey, single instance, #14), rc.3, rc.2 (annotation margin fix, #13) and rc.1 (built locally before CI existed).
