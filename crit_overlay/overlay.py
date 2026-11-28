@@ -2,6 +2,7 @@ import logging
 import os
 import subprocess
 import time
+from collections import deque
 from datetime import datetime
 
 from PySide6.QtCore import QMimeData, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal, QEvent
@@ -186,6 +187,13 @@ class Overlay(QWidget):
         self.show_input_diag = False
         self._diag = {}
         self._seen_devices = set()
+        # Recent input events, for logging the sequence of a stroke that
+        # came without pressure next to one that had it.
+        self._input_log = deque(maxlen=96)
+        self._pen_seen = False
+        self._strokes_to_log = 5      # summaries for the first strokes after each show
+        self._stroke_log_start = 0
+        self._stroke_foreground = None
         self.backdrop = saved["backdrop"]
         self.backdrop_opacity = saved["backdrop_opacity"]
         self.pass_through = False
@@ -488,6 +496,7 @@ class Overlay(QWidget):
         else:
             self.raise_()
             self.activateWindow()
+            self.claim_foreground("monitor switch")
         self.status_changed.emit(f"Monitor {n} of {total}")
 
     def _refresh_monitor_button(self):
@@ -2170,6 +2179,7 @@ class Overlay(QWidget):
             if panel_vis and not self.pass_through:
                 self.panel.show()
             self.update()
+            self.claim_foreground("new capture")
         if grab is None or grab.isNull():
             self.begin_region_selection()
             # After the selection prompt, so it isn't replaced by it.
@@ -2624,10 +2634,31 @@ class Overlay(QWidget):
         QTimer.singleShot(0, native_windows.trim_working_set)
         logger.info("Overlay hidden")
 
+    def claim_foreground(self, reason):
+        """Become the foreground window, and log whether that worked. Tablet
+        drivers choose Windows Ink (pressure) or mouse emulation from the
+        foreground application's settings, so until the overlay is
+        foreground a pen can reach it as a plain mouse: the first strokes
+        after showing it came without pressure until a click activated it."""
+        if not self.isVisible() or self.pass_through:
+            return False
+        self._strokes_to_log = 5
+        if QGuiApplication.platformName() != "windows":
+            return False  # offscreen tests: no real window to bring forward
+        ok = native_windows.claim_foreground(int(self.winId()))
+        if ok:
+            logger.info("Foreground: overlay (%s)", reason)
+        else:
+            _hwnd, _pid, name = native_windows.foreground_info()
+            logger.warning("Foreground: still %s after %s; a pen may draw without pressure until the overlay is "
+                           "clicked", name or "another window", reason)
+        return ok
+
     def show_overlay(self):
         if self.isVisible():
             self.raise_()
             self.activateWindow()
+            self.claim_foreground("show")
             return
         self.show()
         if self.pass_through:
@@ -2638,6 +2669,7 @@ class Overlay(QWidget):
             self.raise_()
             self.activateWindow()
             self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+            self.claim_foreground("show")
         logger.info("Overlay shown")
 
     def toggle_visibility(self):
@@ -2690,6 +2722,7 @@ class Overlay(QWidget):
             self.raise_()
             self.activateWindow()
             self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+            self.claim_foreground("pass-through off")
 
         # The backdrop layer checks self.pass_through itself every repaint
         # (see _paint_backdrop), so no canvas rebuild is needed here either.
@@ -2774,6 +2807,9 @@ class Overlay(QWidget):
         self._mp = mypaint_engine.StrokePainter(self.current, self._canvas_dpr())
         self._feed_mypaint([(pos.x(), pos.y(), first, 0.0, *self._tilt)])
         self._note_stroke_pressure(first)
+        self._stroke_log_start = max(0, len(self._input_log) - 4)
+        self._stroke_foreground = (native_windows.is_foreground(int(self.winId()))
+                                   if self.isVisible() and QGuiApplication.platformName() == "windows" else None)
         self.history.redo_stack.clear()
         self._refresh_history_buttons()
 
@@ -2912,6 +2948,7 @@ class Overlay(QWidget):
         if self.current:
             finished = self.current
             if self._mp is not None:
+                self._log_stroke(finished)
                 # The live surface is the final stroke: cache it rather than
                 # replaying every event on pen-up.
                 layer = self._mp.layer()
@@ -2991,7 +3028,11 @@ class Overlay(QWidget):
         raw = float(event.pressure())
         key = self._device_key(event)
         if key in self._no_pressure_devices:
-            return C.DEFAULT_PRESSURE
+            if raw > 0.0 and (self._tablet_contact or event.type() == QEvent.Type.TabletPress):
+                self._no_pressure_devices.discard(key)
+                logger.info("Pen %s reports pressure again; using it", key)
+            else:
+                return C.DEFAULT_PRESSURE
         dev = event.pointingDevice()
         self._input_has_pressure = False
         if dev is not None and not (dev.capabilities() & QInputDevice.Capability.Pressure):
@@ -3643,6 +3684,16 @@ class Overlay(QWidget):
 
     def _diag_event(self, via, event, raw=None, processed=None):
         self._note_device(event, via)
+        try:
+            dev = event.pointingDevice()
+            dev_name = dev.name() if dev is not None else "?"
+            pointer = dev.pointerType().name if dev is not None else "?"
+            if pointer in ("Pen", "Eraser"):
+                self._pen_seen = True
+            self._input_log.append((time.monotonic(), via, event.type().name, dev_name, pointer,
+                                    raw, event.source().name if via == "mouse" else ""))
+        except Exception:
+            pass
         if not self.show_input_diag:
             return
         try:
@@ -3665,14 +3716,45 @@ class Overlay(QWidget):
         except Exception:
             logger.debug("input diagnostic", exc_info=True)
 
+    def _log_stroke(self, stroke):
+        """One line per stroke for the first strokes after each show, and
+        for any stroke that came as mouse input after a pen has been seen
+        (the case where pressure was missing), with its event sequence."""
+        if not stroke.points:
+            return
+        via = "tablet" if self._mp_has_pressure else "mouse"
+        pressures = [pr for _p, pr in stroke.points]
+        suspicious = via == "mouse" and self._pen_seen
+        if not suspicious and self._strokes_to_log <= 0:
+            return
+        self._strokes_to_log -= 1
+        fg = {True: "yes", False: "NO", None: "?"}[self._stroke_foreground]
+        logger.info("Stroke via %s: %d points, pressure %.2f..%.2f, overlay foreground=%s%s", via, len(pressures),
+                    min(pressures), max(pressures), fg, "  [pen seen, but no pressure]" if suspicious else "")
+        if suspicious or self.show_input_diag:
+            events = list(self._input_log)[self._stroke_log_start:]
+            t0 = events[0][0] if events else 0
+            for t, v, kind, dev, pointer, raw, src in events[:24]:
+                logger.info("    %+6.0f ms  %-6s %-22s %-14s %-7s %s %s", (t - t0) * 1000, v, kind, dev, pointer,
+                            "" if raw is None else f"p={raw:.3f}", src)
+        if self.show_input_diag:
+            self._diag["last_stroke"] = f"via {via}, pressure {min(pressures):.2f}..{max(pressures):.2f}, " \
+                                        f"foreground {fg}"
+
     def _note_stroke_pressure(self, pr):
         if self.show_input_diag:
             self._diag["stroke_pressure"] = pr
             self.update(self._diag_rect())
 
+    def _foreground_text(self):
+        if native_windows.is_foreground(int(self.winId())):
+            return "this overlay"
+        _hwnd, _pid, name = native_windows.foreground_info()
+        return f"{name or 'another window'}  (the tablet driver follows that app's pen settings)"
+
     def _diag_rect(self):
         local = self._anchor_local_rect()
-        return QRect(local.x() + 16, local.y() + local.height() - 196, 470, 180)
+        return QRect(local.x() + 16, local.y() + local.height() - 240, 560, 224)
 
     def _paint_input_diag(self, painter):
         d = self._diag
@@ -3693,6 +3775,8 @@ class Overlay(QWidget):
             f"Tilt         x {d['tilt'][0]:+.0f}°  y {d['tilt'][1]:+.0f}°" if "tilt" in d else "Tilt         -",
             f"Stroke       pressure {pr:.3f}  ->  diameter {brushes.diameter(spec, size, pr):.1f}px of {size:g}px"
             f"   (size by pressure {'on' if size_p else 'off'})",
+            f"Last stroke  {d.get('last_stroke', '-')}",
+            f"Foreground   {self._foreground_text()}",
         ]
         if d.get("mouse_count", 0) and not d.get("tablet_count", 0):
             lines.append("Pen arriving as a mouse: enable Windows Ink for this app in the tablet driver.")

@@ -287,6 +287,7 @@ def run(opts, log_path=None, removed_env=(), unclean_sessions=()):
         overlay.raise_()
         overlay.activateWindow()
         overlay.setFocus()
+        overlay.claim_foreground("startup")
 
     logger.info("Overlay visible=%s geometry=%s", overlay.isVisible(), overlay.geometry())
     logger.info("Entering event loop (startup %.0f ms)", (time.perf_counter() - t0) * 1000)

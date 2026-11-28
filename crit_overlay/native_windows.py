@@ -194,3 +194,90 @@ def display_adapters():
     except Exception:
         logger.debug("EnumDisplayDevicesW failed", exc_info=True)
     return out
+
+
+
+_k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_user32.GetForegroundWindow.argtypes = []
+_user32.GetForegroundWindow.restype = wintypes.HWND
+_user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+_user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+_user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+_user32.SetForegroundWindow.restype = wintypes.BOOL
+_user32.BringWindowToTop.argtypes = [wintypes.HWND]
+_user32.BringWindowToTop.restype = wintypes.BOOL
+_user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+_user32.AttachThreadInput.restype = wintypes.BOOL
+_k32.GetCurrentThreadId.argtypes = []
+_k32.GetCurrentThreadId.restype = wintypes.DWORD
+_k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+_k32.OpenProcess.restype = wintypes.HANDLE
+_k32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                            ctypes.POINTER(wintypes.DWORD)]
+_k32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+_k32.CloseHandle.argtypes = [wintypes.HANDLE]
+_k32.CloseHandle.restype = wintypes.BOOL
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+def foreground_info():
+    """(foreground hwnd, its process id, its executable name) for logs and
+    the input diagnostic. Name is "" when it can't be read."""
+    try:
+        hwnd = _user32.GetForegroundWindow()
+        pid = wintypes.DWORD(0)
+        _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        name = ""
+        handle = _k32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+        if handle:
+            try:
+                buf = ctypes.create_unicode_buffer(520)
+                size = wintypes.DWORD(len(buf))
+                if _k32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                    name = buf.value.rsplit("\\", 1)[-1]
+            finally:
+                _k32.CloseHandle(handle)
+        return int(hwnd or 0), pid.value, name
+    except Exception:
+        logger.debug("foreground_info failed", exc_info=True)
+        return 0, 0, ""
+
+
+def is_foreground(hwnd):
+    try:
+        return int(_user32.GetForegroundWindow() or 0) == int(hwnd)
+    except Exception:
+        return False
+
+
+def claim_foreground(hwnd):
+    """Make `hwnd` the foreground window. Tablet drivers (Wacom and others)
+    pick Windows Ink or mouse emulation from the foreground application's
+    settings, so until this window is foreground a pen may reach it as a
+    plain mouse, without pressure.
+
+    SetForegroundWindow is allowed while this process has the user's most
+    recent input or was just started or activated by it (hotkey, tray,
+    launch); otherwise Windows refuses silently. In that case, briefly
+    attaching to the foreground thread's input lets it through. Returns
+    True when the window is foreground afterwards."""
+    try:
+        hwnd = wintypes.HWND(int(hwnd))
+        if is_foreground(hwnd.value):
+            return True
+        if _user32.SetForegroundWindow(hwnd) and is_foreground(hwnd.value):
+            return True
+        fg = _user32.GetForegroundWindow()
+        fg_thread = _user32.GetWindowThreadProcessId(fg, None) if fg else 0
+        our_thread = _k32.GetCurrentThreadId()
+        attached = bool(fg_thread) and fg_thread != our_thread and \
+            bool(_user32.AttachThreadInput(our_thread, fg_thread, True))
+        try:
+            _user32.BringWindowToTop(hwnd)
+            _user32.SetForegroundWindow(hwnd)
+        finally:
+            if attached:
+                _user32.AttachThreadInput(our_thread, fg_thread, False)
+        return is_foreground(hwnd.value)
+    except Exception:
+        logger.debug("claim_foreground failed", exc_info=True)
+        return False
