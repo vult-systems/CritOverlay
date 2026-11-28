@@ -36,7 +36,8 @@ Don't change these without an issue that discusses the trade-off:
 - **Pens through Windows Ink only.** Qt 6.8 removed Wintab. `--input mouse` is the fallback.
 - **Portable and self-contained.** Standard user, no installer, no registry writes, no network access, no runtimes to install. Onedir, not onefile, and no UPX.
 - **Startup fails loudly.** `launcher.py` stays stdlib-only, so errors before Qt loads still show a message, write a crash report and return a distinct exit code.
-- **Lives in the tray.** Esc hides; only the tray's Exit quits (Esc exits only when there's no tray). One copy per session. Start with Windows is a Startup-folder shortcut, not a registry value (#14).
+- **Lives in the tray.** Esc hides when there's no capture (with a capture it discards it and starts a new selection); only the tray's Exit quits (Esc exits only when there's no tray). A saved F9 screenshot also hides, and the next show resumes that session. One copy per session. Start with Windows is a Startup-folder shortcut, not a registry value (#14).
+- **Captures are pixel-aligned.** A capture is cropped from a full-monitor grab at its device-pixel edges (`QScreen.grabWindow` with a sub-rect rounds the size up at fractional scales), the margin is snapped to whole image pixels, and image and margin are painted into integer device rects from one edge-rounding rule in `capture.py`. Strokes are stored in the image's own coordinates, so fit scaling never lowers export resolution.
 - **Settings carry over.** Bump `SETTINGS_VERSION` and add a migration in `config.py` rather than resetting user settings.
 
 ## Change discipline
@@ -90,6 +91,8 @@ Full procedure: `docs/BUILDING.md#releasing`.
 ## Feature freeze: v1.5.0
 
 In effect from 2026-11-25 until v1.5.0 is tagged stable after #4 passes. The acceptance baseline is **v1.5.0-rc.4** (commit 7d0f363).
+
+On 2026-11-27 the owner reopened the freeze for one feature, the centered capture workflow (#23), to ship as v1.5.0-rc.5. The freeze resumes with rc.5 as the baseline once it's published; nothing else is admitted under this exception.
 
 - **Allowed:** fixes for confirmed bugs, regressions (against rc.4 or v1.4.2), compatibility failures, and release blockers. Each needs an issue with a reproduction and the `release-blocker` label or a reason it's needed now. Docs corrections are allowed.
 - **Not allowed:** new features or options, UI changes, refactoring, dependency or toolchain upgrades (#8). Non-blocking concerns get the `tech-debt` label (tracked in #19) instead of a change.

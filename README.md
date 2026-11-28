@@ -3,8 +3,10 @@
 A transparent, always-on-top drawing overlay for Windows. It puts a drawing
 surface over everything else on screen so you can mark up a student's work
 during a live crit, whatever it happens to be running in: a render, a
-Photoshop file, Maya, a video, a browser tab. Draw with a tablet or a mouse,
-then hit F9 to save an annotated screenshot.
+Photoshop file, Maya, a video, a browser tab. Drag a rectangle around the
+work to capture it into a centered drawing workspace (or click once to draw
+over the whole monitor), mark it up with a tablet or a mouse, then hit F9
+to save an annotated image.
 
 I wrote it for the crit sessions I run in our animation program, where
 screen-sharing a paint-over is faster than describing what I mean.
@@ -23,15 +25,17 @@ screen-sharing a paint-over is faster than describing what I mean.
   slider, for when the page underneath is too busy to draw over. It's a real
   layer, so erasing takes your strokes off it instead of punching through to
   the desktop.
-- A drawing region: restrict drawing to one rectangle, such as a student's
-  render, with an optional annotation margin around it for handwritten
-  notes. Screenshots then save just that area. See
-  [Drawing region and margin](#drawing-region-and-margin).
+- Centered capture: it starts by asking for an area, like a snipping tool.
+  The area becomes a still image centered on the monitor, with an optional
+  annotation margin around it for handwritten notes. Hold Space and drag to
+  move it. F9 saves the image, margin and notes at the image's full
+  resolution. See [Centered capture and margin](#centered-capture-and-margin).
 - Undo and redo.
 - Pass-through mode (F8) to click into whatever is underneath without
   closing the overlay.
-- Screenshots of the monitor your cursor is on, saved to
-  `Pictures\CritOverlay\` and opened in Explorer.
+- Screenshots saved to `Pictures\CritOverlay\`. After saving, the overlay
+  hides to the tray, the image opens in your default viewer, and Explorer
+  opens with the file selected, ready to drag into a chat or email.
 - Lives in the tray: Esc hides the overlay, **Ctrl+Alt+D** (from any app)
   or the tray icon brings it back with your drawing intact, and Exit is in
   the tray menu. Only one copy runs at a time. Optional Start with Windows.
@@ -74,11 +78,12 @@ Or double-click `run.bat`. Use `run_debug.bat` if you want console logging.
 | Ctrl+Z | Undo |
 | Ctrl+Shift+Z | Redo |
 | [ / ] | Brush size down / up |
-| R | Select a drawing region (drag a rectangle; a plain click goes back to the full monitor) |
+| R | Capture a new area (drag a rectangle; a plain click draws on the full monitor instead). Replaces the current capture |
+| Space + drag | Move the capture, with its margin and notes |
 | F7 | Move the overlay to the next monitor (same as the toolbar's monitor button) |
 | F8 | Toggle pass-through |
-| F9 | Screenshot: the drawing region and its margin if one is set, otherwise the monitor under the cursor |
-| Esc | Cancel a region selection; otherwise hide the overlay to the tray (drawings are kept) |
+| F9 | Save: the capture with its margin and notes, otherwise the monitor under the cursor. Then hides to the tray and opens the image |
+| Esc | With a capture: discard it and select a new area. Otherwise hide the overlay to the tray (full-monitor drawings are kept) |
 | Ctrl+Alt+D | Show or hide the overlay from any app (global; [configurable](#tray-hotkey-and-startup)) |
 
 F8 and F9 are Qt shortcuts, so they need the overlay to have keyboard
@@ -92,10 +97,12 @@ Exit.
 
 ### Tray, hotkey and startup
 
-- **Hiding isn't quitting.** Esc, the toolbar's last button and Alt+F4 hide
-  the overlay; strokes, undo history, the region, margin, backdrop and
-  pass-through are all still there when it comes back. While hidden it
-  uses no CPU and gives back the memory it isn't using.
+- **Hiding isn't quitting.** Esc (with no capture), the toolbar's last
+  button, Alt+F4 and a saved screenshot hide the overlay; strokes, undo
+  history, the capture, margin, backdrop and pass-through are all still
+  there when it comes back. With a capture, showing it again comes back to
+  that capture; without one, it starts a new area selection.
+  While hidden it uses no CPU and gives back the memory it isn't using.
 - **Exit** from the tray menu ends the app. On a machine with no
   notification area (some locked-down kiosks), Esc exits instead, since
   there'd be no way back.
@@ -130,37 +137,51 @@ monitor always lines up and renders at that monitor's real resolution.
 - Plugging a projector in leaves the overlay where it is, and a toast says F7
   switches. If the monitor the overlay is on is unplugged, it moves to the
   primary monitor. Resolution or scaling changes keep it on the same monitor.
-- Screenshots (F9) capture the monitor under the cursor, as before.
+- With a capture, F7 moves it to the next monitor and centers it there.
+- Full-monitor screenshots (F9) capture the monitor under the cursor, as
+  before.
 
-## Drawing region and margin
+## Centered capture and margin
 
-By default you draw anywhere on the monitor. To mark up one thing, such as a
-render in a viewer or a reference image, restrict drawing to a rectangle
-around it:
+Each time the overlay appears it asks for an area, the way a snipping tool
+does:
 
-- Press **R**, or click the **region button** on the toolbar (the dashed
-  frame next to the backdrop button) and choose *Select area*. Then drag a
-  rectangle with the pen or mouse. Esc cancels; a plain click, or *Full
-  monitor* in the same menu, goes back to the whole monitor.
-- Strokes start only inside the region and are cut off at its edge. Nothing
-  is deleted: going back to the full monitor shows strokes again in full.
-- The **backdrop** (and its intensity slider) covers only the region.
-- **Annotation margin** (in the region menu, once an area is selected): a
-  band around the region for handwritten notes, with its own thickness,
-  white or black color and opacity, separate from the backdrop intensity.
-  It's off until you turn it on ("Margin: on") or adjust any of its
-  controls, and it updates as you drag. You can draw in it, and the eraser
-  takes strokes off it the same way it does on the backdrop.
-- **F9** with a region set saves just the region and its margin, at the
-  monitor's full resolution. The margin is saved solid in its color with
-  your notes on it, so nothing from the desktop around the region gets into
-  the image, even if the margin is translucent on screen.
-- The region is in the overlay's own coordinates, so it lines up exactly at
-  any display scaling. Moving to another monitor (F7) keeps the region and
-  your strokes where they were, moved inside the monitor if it's smaller.
-- Clicks outside the region don't reach the apps underneath; use
-  pass-through (F8) for that.
-- Margin settings are saved. The region itself lasts for the session.
+- **Drag a rectangle** with the pen or mouse around what you want to mark
+  up, such as a render in a viewer or a reference image. It's captured as a
+  still image and centered on the monitor, with the desktop dimmed around
+  it. Where you selected it doesn't matter.
+- **Click once** instead of dragging to draw live over the whole monitor, as
+  in earlier versions. **Esc** during the selection hides the overlay.
+  Capturing an area discards drawings made on the full monitor, so save
+  those with F9 first.
+- **Space + drag** moves the whole capture: image, margin and notes
+  together.
+- A capture too big for the monitor with its margin is shrunk to fit on
+  screen. That's display only: the image keeps its full resolution, and so
+  does the saved file. The brush stays the same size on screen.
+- The **backdrop** (and its intensity slider) tints the captured image,
+  under your strokes.
+- **Annotation margin**: click the **region button** on the toolbar (the
+  dashed frame next to the backdrop button). It sets a band around the
+  capture for handwritten notes, with its own thickness, white or black
+  color and opacity, separate from the backdrop intensity. It's off until
+  you turn it on ("Margin: on") or adjust any of its controls. Changing the
+  thickness recenters the capture. You can draw in it, and the eraser takes
+  strokes off it the same way it does on the image.
+- **F9** saves the image, margin and notes, at the resolution the image was
+  captured at. Nothing else goes in: no toolbar, cursor or desktop. The
+  margin is saved solid in its color, even if it's translucent on screen.
+  The overlay then hides to the tray, the image opens in your default
+  viewer, and Explorer opens with the file selected. **Ctrl+Alt+D** brings
+  back the same capture with its notes and undo history.
+- **Esc** discards the capture and its notes and starts a new selection
+  straight away. **R** does the same at any time. *Full monitor* in the
+  region menu discards it and goes to live full-monitor drawing.
+- **Pass-through (F8)** with a capture hides the image and margin and
+  shows only your strokes, so you can see what you click on underneath.
+- Image and margin edges line up on whole screen pixels at any display
+  scaling and any fit, so there's no seam between them.
+- Margin settings are saved. A capture lasts until you discard it or quit.
 
 ## Options
 
@@ -237,6 +258,7 @@ crit_overlay/
   brush.py              smoothing, stroke dynamics, compositing
   icons.py              toolbar icons, drawn in code
   color_popup.py        the color swatch popup
+  capture.py            centered capture: crop, fit, pixel-aligned geometry, export
   region.py             drawing region and margin geometry, region screenshots
   region_popup.py       the region and margin popup
   models.py             strokes and undo history
@@ -247,7 +269,7 @@ crit_overlay/
   instance.py           one running copy per session
   autostart.py          Start with Windows (Startup-folder shortcut)
   pass_through_badge.py the way back out of pass-through
-  native_windows.py     Win32 calls (click-through, working set, system info)
+  native_windows.py     Win32 calls (click-through, working set, foreground, system info)
   icon.py               app icon, drawn in code
 packaging/              build script, PyInstaller spec, lock file, verifier
 docs/                   compatibility, deployment, troubleshooting, building

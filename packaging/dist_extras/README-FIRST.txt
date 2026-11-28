@@ -34,17 +34,21 @@ Monitors
   monitor, e.g. from your laptop to the projector. Your drawing moves with
   it. If the monitor it's on is unplugged, it moves to the primary one.
 
-Drawing region
-  Press R (or the dashed-frame button on the toolbar) and drag a rectangle
-  to draw only on one part of the screen, with an optional margin around it
-  for notes. F9 then saves just that area. Esc cancels a selection; a plain
-  click goes back to the full monitor.
+Capturing an area
+  When the overlay appears, drag a rectangle around what you want to mark
+  up. It becomes a still image centered on the monitor. Click once instead
+  to draw over the whole monitor. Hold Space and drag to move the capture.
+  The dashed-frame button on the toolbar adds a margin around it for notes.
+  F9 saves the image, margin and notes, hides the overlay, opens the image,
+  and opens Explorer with the file selected. Esc discards the capture and
+  lets you select a new area; R does the same.
 
 Hiding and quitting
-  Esc hides the overlay to the notification area (tray) and keeps your
-  drawing. Ctrl+Alt+D, from any app, or clicking the tray icon brings it
-  back. To quit, right-click the tray icon > Exit. Starting it again while
-  it runs just brings it back. Start with Windows is in the same menu.
+  Esc (with no capture) hides the overlay to the notification area (tray)
+  and keeps your drawing. Ctrl+Alt+D, from any app, or clicking the tray
+  icon brings it back. To quit, right-click the tray icon > Exit. Starting
+  it again while it runs just brings it back. Start with Windows is in the
+  same menu.
 
 Files it writes
   Logs:        %LOCALAPPDATA%\CritOverlay\logs\
