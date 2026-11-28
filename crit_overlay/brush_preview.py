@@ -13,7 +13,7 @@ import math
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QColor, QPainter, QPixmap
 
-from . import brush, dab
+from . import brushes
 from . import mypaint_engine as mp
 from .models import Stroke
 
@@ -46,17 +46,11 @@ def _stroke(key, color, w, h, size):
         step = 0.0 if prev is None else math.hypot(x - prev.x(), y - prev.y())
         dts.append(0.0 if prev is None else 0.004 + step * 0.0012)
         prev = p
-    if key == dab.CLASSIC:
-        s.points = [(p, brush.effective_pressure(pr, 0.0)) for p, pr in pts]
-    elif key.startswith(mp.PREFIX):
-        if not mp.available():
-            return None
-        s.brush = mp.spec(key[len(mp.PREFIX):])
-        s.points = pts
-        s.dtimes = dts
-    else:
-        s.brush = dab.make_spec(key)
-        s.points = pts
+    if not mp.available():
+        return None
+    s.brush = brushes.spec_for(brushes.PRESETS.get(key) or brushes.ERASERS[key])
+    s.points = pts
+    s.dtimes = dts
     return s
 
 
@@ -72,7 +66,7 @@ def preview(key, color, w, h, dpr=1.0, size=None):
     pm.fill(Qt.GlobalColor.transparent)
     s = _stroke(key, color, w, h, size)
     if s is not None:
-        layer = dab.freehand_layer(s, dpr, cache=False)
+        layer = brushes.freehand_layer(s, dpr, cache=False)
         if layer is not None:
             p = QPainter(pm)
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
@@ -81,4 +75,34 @@ def preview(key, color, w, h, dpr=1.0, size=None):
     _cache[ck] = pm
     if len(_cache) > 200:
         _cache.pop(next(iter(_cache)))
+    return pm
+
+
+_dabs = {}
+
+
+def dab(spec, color, diameter, dpr=1.0):
+    """One libmypaint dab of `spec` at full pressure, `diameter` logical px
+    wide: the brush-size preview."""
+    if not mp.available():
+        return None
+    ck = (spec, QColor(color).rgba(), round(diameter, 1), round(dpr, 2))
+    pm = _dabs.get(ck)
+    if pm is not None:
+        return pm
+    s = Stroke(QColor(color), max(0.5, diameter), 1.0)
+    s.brush = spec
+    # libmypaint paints dabs along movement, so a short stroke (a fifth of
+    # the diameter) stands in for a single dab.
+    c = diameter * 2 + 16
+    n = 6
+    s.points = [(QPointF(c - diameter * 0.1 + diameter * 0.2 * i / n, c), 1.0) for i in range(n + 1)]
+    s.dtimes = [0.0] + [0.01] * n
+    layer = brushes.freehand_layer(s, dpr, cache=False)
+    if layer is None:
+        return None
+    pm = layer[0]
+    _dabs[ck] = pm
+    if len(_dabs) > 64:
+        _dabs.pop(next(iter(_dabs)))
     return pm

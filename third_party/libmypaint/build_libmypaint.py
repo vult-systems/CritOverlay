@@ -1,12 +1,11 @@
-"""Build libmypaint for the MyPaint brush engine comparison (prototype).
+"""Build libmypaint, the app's brush engine (a required part of the build).
 
 Downloads pinned, hash-checked source releases, builds one self-contained
 mypaint.dll with MSVC (json-c static, no glib, no gettext, static CRT) and
-stages it with its licenses and a curated set of brushes in
-crit_overlay/mypaint/, which the app picks up when present. Nothing here
-runs at app runtime and the output is not committed.
+stages it with its licenses and the curated brushes in crit_overlay/mypaint/.
+packaging/build.py runs this with --if-needed; the output is not committed.
 
-    python third_party/libmypaint/build_libmypaint.py
+    python third_party/libmypaint/build_libmypaint.py [--check | --if-needed]
 
 Needs CMake and Visual Studio 2022 (C build tools).
 """
@@ -34,19 +33,17 @@ SOURCES = {
                 "fef66ffc241b7c5cd29e9c518e933c739618cb51c4ed4d745bf648a1afc3fe70", "mypaint-brushes-1.3.1"),
 }
 
-# A small curated set suited to drawing over the screen (no smudge or
-# wet-paint brushes: those sample the canvas, and each stroke here paints on
-# its own transparent layer). All CC0 / public domain.
+# The curated presets and erasers (crit_overlay/brushes.py names them by
+# the staged file name: pack and file joined with "_"). All CC0 / public
+# domain.
 BRUSHES = [
-    ("deevad/ballpen.myb", "Ballpoint"),
-    ("deevad/liner.myb", "Liner"),
-    ("tanda/pencil-2b.myb", "Pencil 2B"),
-    ("deevad/4H_pencil.myb", "Pencil 4H"),
-    ("classic/textured_ink.myb", "Textured Ink"),
-    ("classic/calligraphy.myb", "Calligraphy"),
-    ("tanda/charcoal-01.myb", "Charcoal"),
-    ("tanda/marker-01.myb", "Marker"),
-    ("deevad/airbrush.myb", "Airbrush"),
+    "deevad/soft-dip-pen.myb",       # Studio Pen
+    "tanda/pencil-2b.myb",           # Pencil
+    "kaerhon_v1/inkster_l.myb",      # Ink
+    "tanda/marker-01.myb",           # Marker
+    "deevad/airbrush.myb",           # Soft Brush (tuned in brushes.py)
+    "deevad/large_hard_eraser.myb",  # hard eraser
+    "ramon/Soft_Eraser.myb",         # soft eraser
 ]
 
 CONFIG_H = """\
@@ -125,15 +122,32 @@ def main():
     shutil.copy2(lib / "COPYING", OUT / "LICENSE-libmypaint.txt")
     shutil.copy2(jsonc / "COPYING", OUT / "LICENSE-json-c.txt")
     shutil.copy2(brushes / "COPYING", OUT / "brushes" / "LICENSE-mypaint-brushes.txt")
-    index = []
-    for rel, label in BRUSHES:
-        src = brushes / "brushes" / rel
-        name = rel.replace("/", "_")
-        shutil.copy2(src, OUT / "brushes" / name)
-        index.append(f"{name}\t{label}")
-    (OUT / "brushes" / "index.txt").write_text("\n".join(index) + "\n", encoding="utf-8")
+    for rel in BRUSHES:
+        shutil.copy2(brushes / "brushes" / rel, OUT / "brushes" / staged_name(rel))
     print("staged", OUT)
 
 
+def staged_name(rel):
+    return rel.replace("/", "_")
+
+
+def expected_files():
+    return ["mypaint.dll", "LICENSE-libmypaint.txt", "LICENSE-json-c.txt", "brushes/LICENSE-mypaint-brushes.txt"] + [
+        f"brushes/{staged_name(rel)}" for rel in BRUSHES]
+
+
+def check():
+    """True when crit_overlay/mypaint/ holds everything the app needs."""
+    missing = [f for f in expected_files() if not (OUT / f).exists()]
+    for f in missing:
+        print("missing", OUT / f)
+    return not missing
+
+
 if __name__ == "__main__":
+    if "--check" in sys.argv:
+        sys.exit(0 if check() else 1)
+    if "--if-needed" in sys.argv and check():
+        print("libmypaint already staged in", OUT)
+        sys.exit(0)
     main()

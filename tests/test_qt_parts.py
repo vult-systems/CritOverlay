@@ -13,7 +13,7 @@ from PySide6.QtCore import QPoint, QPointF, QSettings, QSize  # noqa: E402
 
 from crit_overlay import brush  # noqa: E402
 from crit_overlay import constants as C  # noqa: E402
-from crit_overlay import dab  # noqa: E402
+from crit_overlay import brushes  # noqa: E402
 from crit_overlay.config import SETTINGS_VERSION, AppConfig  # noqa: E402
 from crit_overlay.models import Stroke  # noqa: E402
 
@@ -34,10 +34,11 @@ class LayerTests(unittest.TestCase):
 
     def test_stroke_layer_resolution_scales_with_dpr(self):
         stroke = Stroke("#ff0000", 12, 1.0)
-        stroke.points = [(QPointF(10, 10), 0.6), (QPointF(60, 30), 0.6), (QPointF(120, 15), 0.6)]
-        segs = brush.stroke_segments(stroke)
-        one, origin1 = brush.render_stroke_layer(stroke, segs, 1.0)
-        two, origin2 = brush.render_stroke_layer(stroke, segs, 2.0)
+        stroke.points = [(QPointF(10 + i * 2, 10 + i), 0.6) for i in range(50)]
+        stroke.dtimes = [0.0] + [0.006] * 49
+        stroke.brush = brushes.spec_for(brushes.PRESETS["ink"])
+        one, origin1 = brushes.freehand_layer(stroke, 1.0, cache=False)
+        two, origin2 = brushes.freehand_layer(stroke, 2.0, cache=False)
         self.assertEqual(origin1, origin2)
         self.assertEqual(brush.logical_rect(origin1, one), brush.logical_rect(origin2, two))
         self.assertEqual(two.width(), one.width() * 2)
@@ -112,8 +113,8 @@ class MigrationTests(unittest.TestCase):
             "text_family": "IBM Plex Sans", "text_size": C.DEFAULT_TEXT_SIZE, "text_bold": False,
             "text_align": "left",
             # Brush engine prototype: also new, so defaults.
-            "brush_preset": dab.DEFAULT_PRESET, "eraser_size": C.DEFAULT_ERASER_SIZE,
-            "brush_tuning": {k: (p.hardness, p.spacing) for k, p in dab.PRESETS.items()},
+            "brush_preset": brushes.DEFAULT_PRESET, "eraser_size": C.DEFAULT_ERASER_SIZE,
+            "brush_pressure": {},
             "pressure_curve": "normal", "eraser_style": "hard", "eraser_opacity": 1.0,
             "recent_colors": [], "favorite_colors": [], "toolbar_positions": {},
         })

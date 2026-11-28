@@ -8,7 +8,7 @@ from tests import qt_env  # noqa: F401  must come before other PySide6 imports
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSize, Qt  # noqa: E402
 from PySide6.QtGui import QColor, QMouseEvent, QWheelEvent  # noqa: E402
 
-from crit_overlay import brush_popup, brush_preview, dab  # noqa: E402
+from crit_overlay import brush_preview, brushes  # noqa: E402
 from crit_overlay.ui_widgets import clamp_popup  # noqa: E402
 from tests.test_capture import CaptureCase  # noqa: E402
 
@@ -45,15 +45,15 @@ class PlacementTests(unittest.TestCase):
 
 class PreviewTests(unittest.TestCase):
     def test_every_brush_has_a_rendered_preview(self):
-        for _purpose, key, _label, _rec in brush_popup.entries():
+        for key in list(brushes.PRESETS) + list(brushes.ERASERS):
             with self.subTest(key=key):
                 img = brush_preview.preview(key, "#ffffff", 84, 28, 1.0).toImage()
                 inked = sum(1 for x in range(0, 84, 2) for y in range(0, 28, 2) if img.pixelColor(x, y).alpha() > 10)
                 self.assertGreater(inked, 8)
 
     def test_previews_are_cached(self):
-        a = brush_preview.preview("pen", "#ffffff", 60, 20, 1.0)
-        self.assertIs(brush_preview.preview("pen", "#ffffff", 60, 20, 1.0), a)
+        a = brush_preview.preview("studio_pen", "#ffffff", 60, 20, 1.0)
+        self.assertIs(brush_preview.preview("studio_pen", "#ffffff", 60, 20, 1.0), a)
 
 
 class PolishTests(CaptureCase):
@@ -80,7 +80,7 @@ class PolishTests(CaptureCase):
         before = o.brush_size
         f.wheelEvent(QWheelEvent(QPointF(5, 5), QPointF(5, 5), QPoint(0, 0), QPoint(0, 120), Qt.MouseButton.NoButton,
                                  Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False))
-        self.assertAlmostEqual(o.brush_size, dab.step_size(before, 1), places=2)
+        self.assertAlmostEqual(o.brush_size, brushes.step_size(before, 1), places=2)
         mouse(f, "press", 20)
         mouse(f, "release", 20)
         self.assertTrue(f.popup.isVisible(), "a click opens slider and entry")
@@ -133,18 +133,14 @@ class PolishTests(CaptureCase):
         self.assertEqual(o.mode, "eyedropper")
         pop.close()
 
-    def test_brush_picker_tiles_and_collapsible_experiments(self):
+    def test_brush_picker_tiles(self):
         o = self.o
         o._set_mode("brush")
         o._show_brush_popup(o.preset_btn)
         pop = o._brush_popup
-        recommended = [k for _p, k, _l, rec in brush_popup.entries() if rec]
-        self.assertEqual(len(recommended), 5)
-        for key in recommended:
+        self.assertEqual(list(pop.buttons), list(brushes.PRESETS))
+        for key in brushes.PRESETS:
             self.assertFalse(pop.buttons[key].icon().isNull(), "a rendered stroke, not just a name")
-        self.assertFalse(pop.more.expanded(), "experimental brushes start folded")
-        pop.more.header.click()
-        self.assertTrue(pop.more.expanded())
         pop.buttons["marker"].click()
         self.assertEqual(o.brush_preset, "marker")
         self.assertIn("Marker", o.preset_btn.text())

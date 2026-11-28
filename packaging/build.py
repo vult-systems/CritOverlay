@@ -161,6 +161,12 @@ def write_checksums(zip_path):
     print(out.read_text(encoding="utf-8"))
 
 
+def ensure_brush_engine():
+    """libmypaint is part of the app: build and stage it (pinned sources,
+    MSVC) unless crit_overlay/mypaint/ already holds everything."""
+    run([sys.executable, ROOT / "third_party" / "libmypaint" / "build_libmypaint.py", "--if-needed"])
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--skip-verify", action="store_true")
@@ -174,6 +180,7 @@ def main():
     epoch = source_date_epoch()
     env = dict(os.environ, PYTHONHASHSEED="0", SOURCE_DATE_EPOCH=str(epoch))
 
+    ensure_brush_engine()
     run([sys.executable, PACKAGING / "build_icon.py"], env=env)
     info = write_build_info(epoch)
     run([sys.executable, "-m", "PyInstaller", PACKAGING / "crit_overlay.spec",

@@ -23,7 +23,7 @@ from PySide6.QtGui import QGuiApplication, QMouseEvent
 
 from . import app as app_module
 from . import constants as C
-from . import dab
+from . import brushes
 from . import icons
 from . import mypaint_engine
 from . import diagnostics
@@ -147,24 +147,23 @@ def _run_checks(app, overlay, opts, results):
 
 
 def _brush_engine_checks(overlay, results):
-    """The optional libmypaint engine, when bundled: the DLL loads in this
-    (frozen) process and a stroke through it reaches the canvas."""
-    if not (mypaint_engine.DIR / "mypaint.dll").exists():
-        results.warn("MyPaint engine not bundled", str(mypaint_engine.DIR))
-        return
-    results.check("MyPaint engine loads", mypaint_engine.available(), str(mypaint_engine.DIR))
-    brushes = mypaint_engine.brushes()
-    if not brushes:
-        results.check("MyPaint brushes found", False)
-        return
+    """libmypaint is the brush engine: the DLL and every preset's brush file
+    must be bundled and load in this (frozen) process, and a stroke through
+    it must reach the canvas."""
+    results.check("Brush engine (libmypaint) loads", mypaint_engine.available(), str(mypaint_engine.DIR))
+    missing = [f for f in brushes.BRUSH_FILES if not (mypaint_engine.DIR / "brushes" / f).exists()]
+    results.check("Brush files bundled", not missing, ", ".join(missing) or f"{len(brushes.BRUSH_FILES)} brushes")
     original = overlay.brush_preset
     try:
-        overlay._set_brush_preset(brushes[0][0])
+        for key in brushes.PRESETS:
+            overlay._set_brush_preset(key)
+            _draw_test_stroke(overlay)
+        ok = len(overlay.history) == len(brushes.PRESETS) and _canvas_has_ink(overlay)
+        results.check("Every brush paints", ok, ", ".join(brushes.LABELS.values()))
+        overlay._set_mode("eraser")
         _draw_test_stroke(overlay)
-        stroke = overlay.history.strokes[-1] if len(overlay.history) else None
-        results.check("MyPaint stroke reaches the canvas",
-                      stroke is not None and mypaint_engine.is_spec(stroke.brush) and _canvas_has_ink(overlay),
-                      brushes[0][1])
+        overlay._set_mode("brush")
+        results.check("Eraser stroke commits", len(overlay.history) == len(brushes.PRESETS) + 1)
     finally:
         overlay.clear()
         overlay._set_brush_preset(original)
@@ -192,8 +191,8 @@ def _toolbar_checks(overlay, results):
     start = overlay.size_slider.value()
     probe = start + 60 if start + 60 <= overlay.size_slider.maximum() else start - 60
     overlay.size_slider.setValue(probe)
-    slider_to_model = (abs(overlay.brush_size - dab.slider_to_size(probe)) < 0.01
-                       and overlay.size_value_label.text() == dab.format_size(overlay.brush_size))
+    slider_to_model = (abs(overlay.brush_size - brushes.slider_to_size(probe)) < 0.01
+                       and overlay.size_value_label.text() == brushes.format_size(overlay.brush_size))
     overlay.change_size(-1)
     key_to_slider = overlay.size_slider.value() < probe
     overlay._set_size(original)

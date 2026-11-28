@@ -108,19 +108,22 @@ class AppConfig:
         }
 
     def _load_brush(self):
-        # Brush engine prototype keys; new, so older files fall back.
-        from . import dab
-        preset = self._value("brush/preset", dab.DEFAULT_PRESET, str)
-        tuning = {}
-        for key, p in dab.PRESETS.items():
-            tuning[key] = (_clamp(self._value(f"brush/{key}_hardness", p.hardness, float), 0.0, 1.0),
-                           _clamp(self._value(f"brush/{key}_spacing", p.spacing, float), 0.02, 0.5))
+        # Brush keys; new, so older files fall back. Presets from earlier
+        # prototype engines map to the nearest current brush; their old
+        # hardness/spacing keys are simply no longer read.
+        from . import brushes
+        preset = brushes.migrate_preset(self._value("brush/preset", brushes.DEFAULT_PRESET, str))
+        pressure = {}
+        for key in brushes.PRESETS:
+            raw = self._value(f"brush/{key}_pressure", "", str)
+            parts = [p.strip() for p in str(raw).split(",")]
+            if len(parts) == 2 and all(p in ("0", "1") for p in parts):
+                pressure[key] = (parts[0] == "1", parts[1] == "1")
         return {
-            "brush_preset": preset if (preset in dab.PRESET_KEYS or preset.startswith("mypaint:"))
-            else dab.DEFAULT_PRESET,
+            "brush_preset": preset,
             "eraser_size": round(_clamp(self._value("brush/eraser_size", C.DEFAULT_ERASER_SIZE, float),
                                         C.MIN_SIZE, C.MAX_SIZE), 2),
-            "brush_tuning": tuning,
+            "brush_pressure": pressure,
             "pressure_curve": self._pick("brush/pressure_curve", "normal", tuple(C.PRESSURE_CURVES)),
             "eraser_style": self._pick("brush/eraser_style", "hard", C.ERASER_STYLES),
             "eraser_opacity": _clamp(self._value("brush/eraser_opacity", 1.0, float), 0.05, 1.0),
@@ -182,7 +185,7 @@ class AppConfig:
              margin_enabled=C.DEFAULT_MARGIN_ENABLED, margin_size=C.DEFAULT_MARGIN_SIZE,
              margin_color=C.DEFAULT_MARGIN_COLOR, margin_opacity=C.DEFAULT_MARGIN_OPACITY,
              text_family=None, text_size=C.DEFAULT_TEXT_SIZE, text_bold=False, text_align="left",
-             eraser_size=None, brush_preset=None, brush_tuning=None, pressure_curve=None,
+             eraser_size=None, brush_preset=None, brush_pressure=None, pressure_curve=None,
              eraser_style=None, eraser_opacity=None, recent_colors=None, favorite_colors=None,
              toolbar_positions=None):
         self._settings.setValue("brush/color", QColor(color).name())
@@ -205,9 +208,8 @@ class AppConfig:
             import json
             self._settings.setValue("ui/toolbar_positions",
                                     json.dumps({k: list(v) for k, v in toolbar_positions.items()}))
-        for key, (h, s) in (brush_tuning or {}).items():
-            self._settings.setValue(f"brush/{key}_hardness", round(float(h), 3))
-            self._settings.setValue(f"brush/{key}_spacing", round(float(s), 3))
+        for key, (size_p, opacity_p) in (brush_pressure or {}).items():
+            self._settings.setValue(f"brush/{key}_pressure", f"{int(bool(size_p))},{int(bool(opacity_p))}")
         self._settings.setValue("brush/opacity", float(opacity))
         self._settings.setValue("brush/smoothing", float(smoothing))
         self._settings.setValue("brush/backdrop", backdrop or _BACKDROP_NONE)

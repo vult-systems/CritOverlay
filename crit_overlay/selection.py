@@ -12,7 +12,7 @@ from PySide6.QtGui import QTransform
 from PySide6.QtGui import QPainterPathStroker
 
 from . import brush
-from . import dab
+from . import brushes
 
 
 def selectable(stroke):
@@ -81,7 +81,7 @@ def absorb(strokes, stroke):
     for e in strokes[idx + 1:]:
         if not e.eraser or id(e) in have:
             continue
-        if e.points and dab.freehand_bounds(e).intersects(area):
+        if e.points and brushes.freehand_bounds(e).intersects(area):
             added.append((e, QTransform()))
     dup.erasures = dup.erasures + tuple(added)
     return dup

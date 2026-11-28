@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QAbstractSpinBox, QFrame, QHBoxLayout, QLabel, QL
                                QSizePolicy, QSlider, QSpinBox, QToolButton, QVBoxLayout, QWidget)
 
 from . import constants as C
-from . import dab
+from . import brushes
 
 
 # -- popup placement --------------------------------------------------------
@@ -220,8 +220,8 @@ def size_field(tooltip, parent=None):
             return float(text.lower().replace("px", "").strip())
         except ValueError:
             return None
-    return ScrubField("Size", C.MIN_SIZE, C.MAX_SIZE, dab.size_to_slider, dab.slider_to_size, dab.format_size,
-                      parse, dab.step_size, tooltip, parent)
+    return ScrubField("Size", C.MIN_SIZE, C.MAX_SIZE, brushes.size_to_slider, brushes.slider_to_size, brushes.format_size,
+                      parse, brushes.step_size, tooltip, parent)
 
 
 def percent_field(caption, lo, hi, tooltip, parent=None):

@@ -19,7 +19,6 @@ from PySide6.QtGui import (
     QPen,
     QInputDevice,
     QPointingDevice,
-    QRegion,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -35,7 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import brush
-from . import dab
+from . import brushes
 from . import mypaint_engine
 from . import capture as capture_mod
 from . import compat
@@ -125,13 +124,10 @@ class Overlay(QWidget):
 
         self.history = History(C.MAX_STROKE_HISTORY)
         self.current = None
-        # Incremental buffer for the stroke being drawn. Rebuilding the
-        # whole stroke's smoothed path and offscreen layer on every
-        # paintEvent cost more per frame the longer the stroke got. See
-        # _extend_live_layer().
+        # Live preview of the stroke being drawn: libmypaint's surface so far
+        # (_feed_mypaint), composited by paintEvent at the stroke's opacity.
         self._live_layer = None
         self._live_layer_origin = None
-        self._live_baked_index = 0
 
         self.mode = "brush"
         self._pre_eyedropper_mode = "brush"
@@ -166,17 +162,12 @@ class Overlay(QWidget):
         self.brush_size = saved["size"]
         self.opacity = saved["opacity"]
         self.smoothing = saved["smoothing"]
-        # Brush engine (dab.py): the preset for new freehand strokes, the
-        # per-preset tuning, and a separate eraser size.
+        # Brushes (brushes.py; libmypaint draws every freehand stroke): the
+        # preset, per-preset pressure controls, a separate eraser size.
         self.eraser_size = saved["eraser_size"]
         self.brush_preset = saved["brush_preset"]
-        self.brush_tuning = dict(saved["brush_tuning"])
+        self.brush_pressure = dict(saved["brush_pressure"])  # key -> (size, opacity)
         self._brush_popup = None
-        self._dab = None             # DabRenderer of the stroke being drawn
-        self._dab_done = 0           # spline segments already in the live layer
-        self._dab_pressure = 1.0     # smoothed pen pressure
-        self._dab_live_pressure = False
-        self._live_tail = None       # provisional last segment, (pixmap, origin)
         self._input_has_pressure = False
         self._size_preview_until = 0.0
         self.pressure_curve = saved["pressure_curve"]
@@ -188,8 +179,13 @@ class Overlay(QWidget):
         self._tilt = (0.0, 0.0)      # last pen tilt, libmypaint units
         self._mp = None              # mypaint_engine.StrokePainter while drawing
         self._mp_last_time = 0.0
-        if self.brush_preset.startswith(mypaint_engine.PREFIX) and not self._mypaint_preset_ok(self.brush_preset):
-            self.brush_preset = dab.DEFAULT_PRESET
+        self._mp_has_pressure = False
+        self._stroke_pressure = 1.0  # pressure at the latest point of the stroke being drawn
+        # Input diagnostic (Ctrl+Shift+I): what the last input event really
+        # carried, to check a pen end to end.
+        self.show_input_diag = False
+        self._diag = {}
+        self._seen_devices = set()
         self.backdrop = saved["backdrop"]
         self.backdrop_opacity = saved["backdrop_opacity"]
         self.pass_through = False
@@ -1092,7 +1088,7 @@ class Overlay(QWidget):
         pop, v = self._menu_popup()
         v.setContentsMargins(10, 10, 10, 10)
         v.setSpacing(6)
-        self._menu_heading(pop, v, "PEN PRESSURE", first=True)
+        self._menu_heading(pop, v, "PRESSURE RESPONSE", first=True)
         r = QHBoxLayout()
         r.setSpacing(2)
         self.pressure_buttons = {}
@@ -1122,6 +1118,12 @@ class Overlay(QWidget):
         self.smoothing_value_label.setObjectName("SliderValue")
         r.addWidget(self.smoothing_value_label)
         v.addLayout(r)
+        self._menu_heading(pop, v, "DIAGNOSTICS")
+        self.diag_btn = MenuRow(pop, None, "Show input diagnostic", "Ctrl+Shift+I")
+        self.diag_btn.setCheckable(True)
+        self.diag_btn.setToolTip("Raw and processed pen pressure, tilt, device and brush diameter")
+        self.diag_btn.clicked.connect(lambda checked: self.toggle_input_diag())
+        v.addWidget(self.diag_btn)
         self.startup_heading = QWidget(pop)
         sh = QVBoxLayout(self.startup_heading)
         sh.setContentsMargins(0, 0, 0, 0)
@@ -1636,6 +1638,7 @@ class Overlay(QWidget):
         add("Ctrl+D", self.duplicate_selection)
         add("Delete", self.delete_selection)
         add("Tab", self.toggle_interface)
+        add("Ctrl+Shift+I", self.toggle_input_diag)
         add("Ctrl+0", self.frame_capture)
         add("Ctrl+1", self.actual_pixels)
         add("Ctrl+=", lambda: self.zoom_by(1.25))
@@ -1691,7 +1694,7 @@ class Overlay(QWidget):
             text_align=self.text_align,
             eraser_size=self.eraser_size,
             brush_preset=self.brush_preset,
-            brush_tuning=self.brush_tuning,
+            brush_pressure=self.brush_pressure,
             pressure_curve=self.pressure_curve,
             eraser_style=self.eraser_style,
             eraser_opacity=self.eraser_opacity,
@@ -1768,15 +1771,11 @@ class Overlay(QWidget):
     def _curved(self, pressure):
         return max(0.0, min(1.0, pressure)) ** C.PRESSURE_CURVES.get(self.pressure_curve, 1.0)
 
-    def _mypaint_preset_ok(self, key):
-        return any(k == key for k, _label in mypaint_engine.brushes())
-
     def _preset_label(self, key):
-        from .brush_popup import label_for
-        return label_for(key)
+        return brushes.LABELS.get(key, key)
 
     def _set_brush_preset(self, key):
-        if key not in dab.PRESET_KEYS and not self._mypaint_preset_ok(key):
+        if key not in brushes.PRESETS:
             return
         self.brush_preset = key
         if self.mode != "brush":
@@ -1786,24 +1785,25 @@ class Overlay(QWidget):
         self._sync_text_bar()
         self._save_settings()
 
-    def _tuning_for(self, key):
-        p = dab.PRESETS.get(key) or dab.PRESETS[dab.DEFAULT_PRESET]
-        return self.brush_tuning.get(key, (p.hardness, p.spacing))
+    def pressure_flags(self, key=None):
+        """(pressure drives size, pressure drives opacity) for a preset."""
+        key = key or self.brush_preset
+        p = brushes.PRESETS[key]
+        return self.brush_pressure.get(key, (p.size_pressure, p.opacity_pressure))
 
-    def _set_brush_tuning(self, hardness=None, spacing=None):
-        key = self.brush_preset
-        if key not in dab.PRESETS:
-            return
-        h, s = self._tuning_for(key)
-        self.brush_tuning[key] = (h if hardness is None else hardness, s if spacing is None else spacing)
-        self._show_size_preview()
+    def set_brush_pressure(self, size=None, opacity=None):
+        """Turn pressure-driven size or opacity on or off for the current
+        brush (each brush remembers its own)."""
+        s, o = self.pressure_flags()
+        self.brush_pressure[self.brush_preset] = (s if size is None else bool(size),
+                                                  o if opacity is None else bool(opacity))
         self._save_settings()
 
-    def _brush_spec(self, eraser, taper):
+    def _stroke_spec(self, eraser):
         if eraser:
-            return dab.make_spec("eraser_soft" if self.eraser_style == "soft" else "eraser")
-        h, s = self._tuning_for(self.brush_preset)
-        return dab.make_spec(self.brush_preset, h, s, taper)
+            return brushes.spec_for(brushes.ERASERS[self.eraser_style])
+        size_p, opacity_p = self.pressure_flags()
+        return brushes.spec_for(brushes.PRESETS[self.brush_preset], size_p, opacity_p)
 
     def _show_size_preview(self):
         """Show the brush at its real size and softness for a moment, at
@@ -1876,7 +1876,7 @@ class Overlay(QWidget):
 
     def _sync_size_slider(self):
         value = self._active_size()
-        for widget, v in ((self.size_slider, dab.size_to_slider(value)), (self.size_value_label, value)):
+        for widget, v in ((self.size_slider, brushes.size_to_slider(value)), (self.size_value_label, value)):
             widget.blockSignals(True)
             widget.setValue(v)
             widget.blockSignals(False)
@@ -1914,10 +1914,10 @@ class Overlay(QWidget):
         self._save_settings()
 
     def _on_size_slider_changed(self, v):
-        self._set_size(dab.slider_to_size(v))
+        self._set_size(brushes.slider_to_size(v))
 
     def change_size(self, delta):
-        self._set_size(dab.step_size(self._active_size(), delta))
+        self._set_size(brushes.step_size(self._active_size(), delta))
 
     def _set_opacity(self, percent):
         percent = max(5, min(100, int(round(percent))))
@@ -2426,7 +2426,7 @@ class Overlay(QWidget):
     def _paint_adjust_hud(self, painter):
         a = self._adjust
         painter.save()
-        text = f"{dab.format_size(self._active_size())}   {int(round(self._active_opacity() * 100))}%"
+        text = f"{brushes.format_size(self._active_size())}   {int(round(self._active_opacity() * 100))}%"
         f = QFont("Segoe UI")
         f.setPixelSize(12)
         painter.setFont(f)
@@ -2749,11 +2749,8 @@ class Overlay(QWidget):
         base = self.eraser_size if use_eraser else self.brush_size
         strength = self.eraser_opacity if use_eraser else self.opacity
         self.current = Stroke(self.color, base / self._view_scale(), strength, use_eraser, shape)
-        self._dab = None
-        self._live_tail = None
         self._live_layer = None
         self._live_layer_origin = None
-        self._live_baked_index = 0
         if shape is not None:
             # Two points, start and end, both at the press. No lazy brush.
             self.lazy_pos = None
@@ -2763,45 +2760,20 @@ class Overlay(QWidget):
             self.history.redo_stack.clear()
             self._refresh_history_buttons()
             return
-        if self.brush_preset.startswith(mypaint_engine.PREFIX) and not use_eraser and mypaint_engine.available():
-            # MyPaint engine: libmypaint gets every raw input event with its
-            # time step and does its own smoothing and dynamics.
-            self.current.brush = mypaint_engine.spec(self.brush_preset[len(mypaint_engine.PREFIX):])
-            self.current.dtimes = [0.0]
-            self.current.tilts = [self._tilt]
-            first = self.pressure if self._input_has_pressure else mypaint_engine.MOUSE_PRESSURE
-            self._mp_has_pressure = self._input_has_pressure
-            self.current.points.append((QPointF(pos), first))
-            self._mp_last_time = time.monotonic()
-            self._mp = mypaint_engine.StrokePainter(self.current, self._canvas_dpr())
-            self._feed_mypaint([(pos.x(), pos.y(), first, 0.0, *self._tilt)])
-            self.history.redo_stack.clear()
-            self._refresh_history_buttons()
-            return
-        if self.brush_preset != dab.CLASSIC:
-            # Dab engine. Without real pen pressure, full pressure and
-            # tapered ends.
-            has_pressure = self._input_has_pressure
-            self._dab_live_pressure = has_pressure
-            self._dab_pressure = self.pressure if has_pressure else 1.0
-            self.current.brush = self._brush_spec(use_eraser, taper=not has_pressure)
-            self.current.points.append((QPointF(self.lazy_pos), self._dab_pressure))
-            self._last_point_time = time.monotonic()
-            self._dab = dab.DabRenderer(self.current)
-            self._dab_done = 0
-            first = self._dab.start()
-            self._add_live_dabs(first)
-            self.history.redo_stack.clear()
-            self._refresh_history_buttons()
-            if first:
-                self._update_doc_rect(QRectF(dab.dab_bounds(first)))
-            return
-        # Seed the first point immediately (rather than waiting for enough
-        # movement to pass the lazy-brush radius) so a plain tap still
-        # leaves a dot instead of silently drawing nothing.
-        self._last_effective_pressure = brush.effective_pressure(self.pressure, 0.0)
-        self.current.points.append((QPointF(self.lazy_pos), self._last_effective_pressure))
-        self._last_point_time = time.monotonic()
+        # Freehand, brush or eraser: libmypaint gets every input event with
+        # its time step, pressure and tilt, and does its own dynamics. A
+        # mouse (no pressure sensor) paints at full pressure.
+        self.current.brush = self._stroke_spec(use_eraser)
+        self.current.dtimes = [0.0]
+        self.current.tilts = [self._tilt]
+        self._mp_has_pressure = self._input_has_pressure
+        first = self.pressure if self._mp_has_pressure else mypaint_engine.MOUSE_PRESSURE
+        self._stroke_pressure = first
+        self.current.points.append((QPointF(pos), first))
+        self._mp_last_time = time.monotonic()
+        self._mp = mypaint_engine.StrokePainter(self.current, self._canvas_dpr())
+        self._feed_mypaint([(pos.x(), pos.y(), first, 0.0, *self._tilt)])
+        self._note_stroke_pressure(first)
         self.history.redo_stack.clear()
         self._refresh_history_buttons()
 
@@ -2815,54 +2787,29 @@ class Overlay(QWidget):
             self._update_shape_end()
             self._mark_dirty(prev_cursor, self.cursor_pos)
             return
-        if self._mp is not None:
-            # Same stabilizer as the other engines (the SMOOTH slider), then
-            # every event goes to libmypaint with its time step, so its own
-            # dynamics see a steady stream even while the lazy point rests.
-            prev_cursor = self.cursor_pos
-            self.cursor_pos = QPointF(pos)
-            if self.smoothing > 0.02:
-                self._advance_lazy(QPointF(pos))
-            else:
-                self.lazy_pos = QPointF(pos)
-            at = QPointF(self.lazy_pos)
-            now = time.monotonic()
-            dt = max(1e-4, now - self._mp_last_time)
-            self._mp_last_time = now
-            pr = (pressure if pressure > 0 else 0.0) if self._mp_has_pressure else mypaint_engine.MOUSE_PRESSURE
-            self.current.points.append((at, pr))
-            self.current.dtimes.append(dt)
-            self.current.tilts.append(self._tilt)
-            self._feed_mypaint([(at.x(), at.y(), pr, dt, *self._tilt)])
-            self._mark_dirty(prev_cursor, self.cursor_pos, at)
+        if self._mp is None:
             return
-        raw = QPointF(pos)
+        # The stabilizer (SMOOTH) moves a lazy point after the pen; every
+        # event still goes to libmypaint with its time step, so its own
+        # dynamics see a steady stream even while the lazy point rests.
         prev_cursor = self.cursor_pos
-        prev_lazy = QPointF(self.lazy_pos)
-        self.cursor_pos = raw
-        self.pressure = pressure if pressure > 0 else C.DEFAULT_PRESSURE
-
-        view_scale = self._view_scale()
-        if not self._advance_lazy(raw):
-            self._mark_dirty(prev_cursor, raw)
-            return
-
-        last_point, _ = self.current.points[-1]
-        moved = ((last_point.x() - self.lazy_pos.x()) ** 2 + (last_point.y() - self.lazy_pos.y()) ** 2) ** 0.5
-        if moved >= C.MIN_POINT_SPACING / view_scale:
-            now = time.monotonic()
-            dt = max(1e-3, now - self._last_point_time)
-            speed = moved * view_scale / dt  # on-screen speed
-            if self.current.brush is not None:
-                if self._dab_live_pressure:
-                    self._dab_pressure += (self.pressure - self._dab_pressure) * dab.PRESSURE_EASE
-                self.current.points.append((QPointF(self.lazy_pos), self._dab_pressure))
-            else:
-                self._last_effective_pressure = brush.effective_pressure(self.pressure, speed)
-                self.current.points.append((QPointF(self.lazy_pos), self._last_effective_pressure))
-            self._last_point_time = now
-            self._extend_live_layer()
-        self._mark_dirty(prev_cursor, raw, prev_lazy, self.lazy_pos)
+        self.cursor_pos = QPointF(pos)
+        if self.smoothing > 0.02:
+            self._advance_lazy(QPointF(pos))
+        else:
+            self.lazy_pos = QPointF(pos)
+        at = QPointF(self.lazy_pos)
+        now = time.monotonic()
+        dt = max(1e-4, now - self._mp_last_time)
+        self._mp_last_time = now
+        pr = (pressure if pressure > 0 else 0.0) if self._mp_has_pressure else mypaint_engine.MOUSE_PRESSURE
+        self._stroke_pressure = pr
+        self.current.points.append((at, pr))
+        self.current.dtimes.append(dt)
+        self.current.tilts.append(self._tilt)
+        self._feed_mypaint([(at.x(), at.y(), pr, dt, *self._tilt)])
+        self._note_stroke_pressure(pr)
+        self._mark_dirty(prev_cursor, self.cursor_pos, at)
 
     def _advance_lazy(self, raw):
         """The stabilizer shared by all engines: a lazy point trails the pen
@@ -2909,11 +2856,6 @@ class Overlay(QWidget):
             bounds = self.capture.transform().mapRect(bounds)
         return bounds.toAlignedRect().adjusted(-2, -2, 2, 2)
 
-    # How many already-baked trailing points to recompute with each new one.
-    # Catmull-Rom segment i depends only on points i-1..i+2, so a small
-    # overlap reproduces the same curve as a full-stroke recompute.
-    _LIVE_LAYER_OVERLAP = 3
-
     def _feed_mypaint(self, events):
         changed = self._mp.add(events)
         if changed is None:
@@ -2931,77 +2873,9 @@ class Overlay(QWidget):
             rect = self.capture.transform().mapRect(rect)
         self.update(rect.toAlignedRect().adjusted(-2, -2, 2, 2))
 
-    def _add_live_dabs(self, dabs):
-        layer = dab.render_dabs(self.current, dabs, self._canvas_dpr())
-        if layer is not None:
-            self._merge_live(*layer)
-
-    def _extend_live_dabs(self):
-        """Dab engine: render each spline segment once, as soon as the point
-        after it fixes its curve. The last segment is drawn as a provisional
-        tail every event, so the stroke reaches the pen without waiting."""
-        stroke = self.current
-        n = len(stroke.points)
-        dirty = QRectF()
-        if self._live_tail is not None:
-            dirty = QRectF(brush.logical_rect(self._live_tail[1], self._live_tail[0]))
-        dabs = []
-        while self._dab_done <= n - 3:
-            dabs.extend(self._dab.segment(self._dab_done))
-            self._dab_done += 1
-        if dabs:
-            self._add_live_dabs(dabs)
-            dirty = dirty.united(QRectF(dab.dab_bounds(dabs)))
-        self._live_tail = None
-        if n >= 2:
-            tail = self._dab.clone().segment(n - 2)
-            self._live_tail = dab.render_dabs(stroke, tail, self._canvas_dpr())
-            if self._live_tail is not None:
-                dirty = dirty.united(QRectF(brush.logical_rect(self._live_tail[1], self._live_tail[0])))
-        if not dirty.isEmpty():
-            self._update_doc_rect(dirty)
-
-    def _finish_live_dabs(self, stroke):
-        """Without a taper the final render is the live layer plus the last
-        segment, so finish that and hand it to the layer cache instead of
-        re-stamping the whole stroke on pen-up."""
-        n = len(stroke.points)
-        dabs = []
-        while self._dab_done <= n - 2:
-            dabs.extend(self._dab.segment(self._dab_done))
-            self._dab_done += 1
-        if dabs:
-            self._add_live_dabs(dabs)
-        if self._live_layer is not None:
-            dab.layer_cache.put(stroke, self._canvas_dpr(), (self._live_layer, self._live_layer_origin))
-
     def _paint_live(self, painter):
-        """The live layer plus the provisional tail. Where they overlap they
-        are flattened together first, so a translucent stroke doesn't
-        double up at the joint."""
-        tail = self._live_tail
-        if tail is None:
-            if self._live_layer is not None:
-                painter.drawPixmap(self._live_layer_origin, self._live_layer)
-            return
-        tpix, torigin = tail
-        if self._live_layer is None:
-            painter.drawPixmap(torigin, tpix)
-            return
-        trect = brush.logical_rect(torigin, tpix)
-        lrect = brush.logical_rect(self._live_layer_origin, self._live_layer)
-        merged = brush.new_layer(trect.size(), self._canvas_dpr())
-        p = QPainter(merged)
-        try:
-            p.drawPixmap(self._live_layer_origin - trect.topLeft(), self._live_layer)
-            p.drawPixmap(0, 0, tpix)
-        finally:
-            p.end()
-        painter.save()
-        painter.setClipRegion(QRegion(lrect).subtracted(QRegion(trect)), Qt.ClipOperation.IntersectClip)
-        painter.drawPixmap(self._live_layer_origin, self._live_layer)
-        painter.restore()
-        painter.drawPixmap(trect.topLeft(), merged)
+        if self._live_layer is not None:
+            painter.drawPixmap(self._live_layer_origin, self._live_layer)
 
     def _merge_live(self, new_pixmap, new_origin, replace=False):
         """Composite a freshly rendered piece onto the live stroke layer,
@@ -3034,67 +2908,15 @@ class Overlay(QWidget):
                 painter.end()
             self._live_layer, self._live_layer_origin = merged, union.topLeft()
 
-    def _extend_live_layer(self):
-        if self.current.brush is not None:
-            self._extend_live_dabs()
-            return
-        stroke = self.current
-        points = stroke.points
-        n = len(points)
-        start = max(0, self._live_baked_index - self._LIVE_LAYER_OVERLAP)
-        window = points[start:]
-        if len(window) < 2:
-            return
-        # The true point preceding the window, so its first segment's
-        # curvature matches what a full-stroke recompute would produce
-        # instead of being (wrongly) treated as the start of the stroke.
-        extra_before = points[start - 1][0] if start > 0 else None
-        segments = brush.segments_for_points(window, stroke.size, extra_before=extra_before)
-        dpr = self._canvas_dpr()
-        layer = brush.render_stroke_layer(stroke, segments, dpr)
-        if layer is None:
-            return
-        new_pixmap, new_origin = layer
-        new_rect = brush.logical_rect(new_origin, new_pixmap)
-
-        if self._live_layer is None:
-            self._live_layer, self._live_layer_origin = new_pixmap, new_origin
-        else:
-            old_rect = brush.logical_rect(self._live_layer_origin, self._live_layer)
-            if old_rect.contains(new_rect):
-                # Fits in the existing buffer, so draw in place. The buffer
-                # is always alpha=255 internally and opacity is applied once
-                # at final composite, so painting opaque over opaque here
-                # can't double-blend.
-                painter = QPainter(self._live_layer)
-                try:
-                    painter.drawPixmap(new_origin - self._live_layer_origin, new_pixmap)
-                finally:
-                    painter.end()
-            else:
-                union = old_rect.united(new_rect)
-                merged = brush.new_layer(union.size(), dpr)
-                painter = QPainter(merged)
-                try:
-                    painter.drawPixmap(old_rect.topLeft() - union.topLeft(), self._live_layer)
-                    painter.drawPixmap(new_rect.topLeft() - union.topLeft(), new_pixmap)
-                finally:
-                    painter.end()
-                self._live_layer, self._live_layer_origin = merged, union.topLeft()
-        self._live_baked_index = n
-
     def _end_stroke(self):
         if self.current:
             finished = self.current
-            if (finished.brush is not None and self._dab is not None and len(finished.points) > 1
-                    and not finished.brush.taper):
-                self._finish_live_dabs(finished)
             if self._mp is not None:
                 # The live surface is the final stroke: cache it rather than
                 # replaying every event on pen-up.
                 layer = self._mp.layer()
                 if layer is not None:
-                    dab.layer_cache.put(finished, self._canvas_dpr(), layer)
+                    brushes.layer_cache.put(finished, self._canvas_dpr(), layer)
                 else:
                     finished.points = []  # libmypaint painted nothing
                 self._mp.close()
@@ -3106,11 +2928,8 @@ class Overlay(QWidget):
                 finished.points = []
             self.current = None
             self.lazy_pos = None
-            self._dab = None
-            self._live_tail = None
             self._live_layer = None
             self._live_layer_origin = None
-            self._live_baked_index = 0
             if finished.points:
                 self.history.commit(finished)
                 self._commit_stroke_to_canvas(finished)
@@ -3178,16 +2997,22 @@ class Overlay(QWidget):
         if dev is not None and not (dev.capabilities() & QInputDevice.Capability.Pressure):
             self._mark_no_pressure(key, "driver reports no pressure capability")
             return C.DEFAULT_PRESSURE
-        if event.type() == QEvent.Type.TabletPress:
+        # A pen with a dead pressure sensor reports 0 for a whole stroke;
+        # only then fall back to fixed pressure. Zeros while the tip lands
+        # (common with Windows Ink) don't count, as long as the stroke
+        # reports pressure at some point.
+        etype = event.type()
+        if etype == QEvent.Type.TabletPress:
             self._zero_pressure_run = 0
-        if self._tablet_contact or event.type() == QEvent.Type.TabletPress:
+            self._stroke_events = 0
+        if self._tablet_contact or etype == QEvent.Type.TabletPress:
+            self._stroke_events = getattr(self, "_stroke_events", 0) + 1
             if raw <= 0.0:
                 self._zero_pressure_run += 1
-                if self._zero_pressure_run >= _ZERO_PRESSURE_EVENTS:
-                    self._mark_no_pressure(key, "pressure stayed at 0 while drawing")
-                    return C.DEFAULT_PRESSURE
-            else:
-                self._zero_pressure_run = 0
+        if etype == QEvent.Type.TabletRelease:
+            if self._zero_pressure_run >= _ZERO_PRESSURE_EVENTS and                     self._zero_pressure_run >= getattr(self, "_stroke_events", 0):
+                self._mark_no_pressure(key, "pressure stayed at 0 for a whole stroke")
+            self._zero_pressure_run = 0
         self._input_has_pressure = True
         return max(0.01, self._curved(raw))
 
@@ -3199,8 +3024,10 @@ class Overlay(QWidget):
 
     def _handle_tablet_event(self, event):
         event_type = event.type()
+        raw_pressure = float(event.pressure())
         pressure = self._tablet_pressure(event)
         self._tilt = mypaint_engine.tilt(event.xTilt(), event.yTilt())
+        self._diag_event("tablet", event, raw_pressure, pressure)
         pos = self._overlay_pos(event)
         is_eraser_tip = event.pointerType() == QPointingDevice.PointerType.Eraser
 
@@ -3294,6 +3121,7 @@ class Overlay(QWidget):
         return self._tablet_contact or (time.monotonic() - self._last_tablet_time) < C.TABLET_MOUSE_GUARD_S
 
     def mousePressEvent(self, event):
+        self._diag_event("mouse", event)
         try:
             if self._is_tablet_synthesized():
                 event.accept()
@@ -3338,6 +3166,8 @@ class Overlay(QWidget):
             event.accept()
 
     def mouseMoveEvent(self, event):
+        if event.buttons():
+            self._diag_event("mouse", event)
         try:
             if self._is_tablet_synthesized():
                 event.accept()
@@ -3432,7 +3262,7 @@ class Overlay(QWidget):
         # strokes), blended once at stroke.opacity so it never doubles up
         # where it overlaps itself. An eraser's layer is its coverage mask,
         # removed from what is below with DestinationOut.
-        layer = dab.freehand_layer(stroke, self._canvas_dpr())
+        layer = brushes.freehand_layer(stroke, self._canvas_dpr())
         if layer is None:
             return
         pixmap, origin = layer
@@ -3599,7 +3429,7 @@ class Overlay(QWidget):
         where it was drawn. Exact under antialiasing: Clear left
         dst * (1 - coverage), and this adds annotation * coverage."""
         dpr = self._canvas_dpr()
-        found = dab.freehand_layer(eraser, dpr)
+        found = brushes.freehand_layer(eraser, dpr)
         if found is None:
             return
         mask, origin = found
@@ -3667,7 +3497,7 @@ class Overlay(QWidget):
 
             live_eraser = (
                 self.current is not None and self.current.eraser
-                and (self._live_layer is not None or self._live_tail is not None)
+                and self._live_layer is not None
             )
             if self._peek:
                 pass  # H held: the artwork alone, for a before/after look
@@ -3698,7 +3528,7 @@ class Overlay(QWidget):
                 painter.drawPixmap(dirty.topLeft(), temp)
             else:
                 painter.drawPixmap(self._canvas_origin, self._canvas)
-                if self.current and (self._live_layer is not None or self._live_tail is not None):
+                if self.current and self._live_layer is not None:
                     # Brush preview: SourceOver only adds color on top, so
                     # it can't reach through to the backdrop the way the
                     # eraser does. No buffer needed.
@@ -3719,6 +3549,8 @@ class Overlay(QWidget):
                 self._paint_selection(painter)
             if self._adjust is not None and not self._capturing:
                 self._paint_adjust_hud(painter)
+            if self.show_input_diag and not self._capturing:
+                self._paint_input_diag(painter)
             if self.region is not None and not self._capturing and not self.pass_through:
                 self._paint_region_frame(painter, self.region)
             if self._selecting and self._selection_anchor is not None and not self._capturing:
@@ -3753,34 +3585,134 @@ class Overlay(QWidget):
             painter.end()
 
     def _ring_diameter(self):
-        """On-screen diameter of the brush ring: the dab under the pen while
-        drawing, full pressure while hovering."""
+        """On-screen diameter of the brush ring: the size under the pen
+        while drawing (with pressure-driven size), full size hovering."""
         size = self._active_size()
         stroke = self.current
-        if stroke is not None and isinstance(stroke.brush, dab.BrushSpec):
-            return dab.diameter(dab.preset_for(stroke.brush), size, self._dab_pressure)
-        if self.brush_preset == dab.CLASSIC or self.mode in SHAPES:
+        if stroke is not None and mypaint_engine.is_spec(stroke.brush):
+            return brushes.diameter(stroke.brush, size, self._stroke_pressure)
+        if self.mode in SHAPES:
             return brush.width_for(size, self._last_effective_pressure)
         return size
 
     def _paint_size_preview(self, painter, center, d):
-        """The brush as it will paint: its real stamp at full pressure."""
+        """The brush as it will paint at full pressure: a real libmypaint
+        dab, at its size."""
         painter.save()
-        if self.brush_preset not in dab.PRESETS or self.mode == "eraser":
-            fill = QColor(255, 255, 255, 120) if self.mode == "eraser" else QColor(self.color)
-            if self.mode != "eraser":
-                fill.setAlpha(int(255 * self.opacity))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(fill)
-            painter.drawEllipse(center, d / 2, d / 2)
-        else:
-            spec = self._brush_spec(False, False)
-            probe = Stroke(self.color, d, self.opacity)
-            probe.brush = spec
-            probe.points = [(QPointF(center), 1.0)]
-            dabs = [(center.x(), center.y(), d, 1.0, 0)]
-            painter.setOpacity(self.opacity)
-            dab.paint_dabs(painter, probe, dabs, self._window_dpr())
+        spec = self._stroke_spec(self.mode == "eraser")
+        color = QColor(255, 255, 255) if self.mode == "eraser" else self.color
+        pm = brush_preview.dab(spec, color, d, self._window_dpr())
+        if pm is not None:
+            painter.setOpacity(0.6 if self.mode == "eraser" else self.opacity)
+            r = pm.deviceIndependentSize()
+            painter.drawPixmap(QPointF(center.x() - r.width() / 2, center.y() - r.height() / 2), pm)
+        painter.restore()
+
+    # -- input diagnostic -------------------------------------------------------------
+
+    def toggle_input_diag(self):
+        self.show_input_diag = not self.show_input_diag
+        if hasattr(self, "diag_btn"):
+            self.diag_btn.setChecked(self.show_input_diag)
+        self.status_changed.emit("Input diagnostic on (Ctrl+Shift+I)" if self.show_input_diag
+                                 else "Input diagnostic off")
+        self.update()
+
+    def _note_device(self, event, via):
+        """Log each input device once, as Qt reports it: the first thing to
+        look at when a pen draws without pressure."""
+        try:
+            dev = event.pointingDevice()
+            name = dev.name() if dev is not None else "?"
+            key = (via, name, dev.type().name if dev else "?", dev.pointerType().name if dev else "?")
+        except Exception:
+            return
+        if key in self._seen_devices:
+            return
+        self._seen_devices.add(key)
+        caps = []
+        try:
+            c = dev.capabilities()
+            for flag in ("Pressure", "XTilt", "YTilt", "Rotation", "TangentialPressure", "MouseEmulation"):
+                if c & getattr(QInputDevice.Capability, flag):
+                    caps.append(flag)
+        except Exception:
+            pass
+        logger.info("Input seen via %s events: device %r type=%s pointer=%s caps=%s", via, key[1], key[2], key[3],
+                    "+".join(caps) or "none")
+
+    def _diag_event(self, via, event, raw=None, processed=None):
+        self._note_device(event, via)
+        if not self.show_input_diag:
+            return
+        try:
+            dev = event.pointingDevice()
+            caps = dev.capabilities() if dev is not None else 0
+            d = self._diag
+            d["via"] = via
+            d["device"] = f"{dev.name() if dev else '?'} ({dev.type().name if dev else '?'}, " \
+                          f"{dev.pointerType().name if dev else '?'})"
+            d["pressure_cap"] = bool(caps & QInputDevice.Capability.Pressure) if dev is not None else False
+            d["event"] = event.type().name
+            if via == "mouse":
+                d["source"] = event.source().name
+            if raw is not None:
+                d["raw"] = raw
+                d["processed"] = processed
+                d["tilt"] = (event.xTilt(), event.yTilt())
+            d[via + "_count"] = d.get(via + "_count", 0) + 1
+            self.update(self._diag_rect())
+        except Exception:
+            logger.debug("input diagnostic", exc_info=True)
+
+    def _note_stroke_pressure(self, pr):
+        if self.show_input_diag:
+            self._diag["stroke_pressure"] = pr
+            self.update(self._diag_rect())
+
+    def _diag_rect(self):
+        local = self._anchor_local_rect()
+        return QRect(local.x() + 16, local.y() + local.height() - 196, 470, 180)
+
+    def _paint_input_diag(self, painter):
+        d = self._diag
+        size = self._active_size()
+        spec = self.current.brush if (self.current is not None and self.current.brush is not None) \
+            else self._stroke_spec(self.mode == "eraser")
+        pr = d.get("stroke_pressure", 1.0)
+        size_p = getattr(spec, "size_pressure", False)
+        lines = [
+            "INPUT DIAGNOSTIC  (Ctrl+Shift+I)",
+            f"Last event   {d.get('event', '-')} via {d.get('via', '-')}"
+            + (f"  [{d.get('source')}]" if d.get('via') == 'mouse' else ""),
+            f"Device       {d.get('device', '-')}",
+            f"Pressure cap {'yes' if d.get('pressure_cap') else 'NO'}    tablet events {d.get('tablet_count', 0)}"
+            f"   mouse events {d.get('mouse_count', 0)}",
+            f"Raw pressure {d['raw']:.3f}   processed {d['processed']:.3f} ({self.pressure_curve})"
+            if "raw" in d else "Raw pressure -   (no tablet events yet)",
+            f"Tilt         x {d['tilt'][0]:+.0f}°  y {d['tilt'][1]:+.0f}°" if "tilt" in d else "Tilt         -",
+            f"Stroke       pressure {pr:.3f}  ->  diameter {brushes.diameter(spec, size, pr):.1f}px of {size:g}px"
+            f"   (size by pressure {'on' if size_p else 'off'})",
+        ]
+        if d.get("mouse_count", 0) and not d.get("tablet_count", 0):
+            lines.append("Pen arriving as a mouse: enable Windows Ink for this app in the tablet driver.")
+        r = QRectF(self._diag_rect())
+        painter.save()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(20, 20, 23, 230))
+        painter.drawRoundedRect(r, 8, 8)
+        f = QFont("Consolas")
+        f.setStyleHint(QFont.StyleHint.Monospace)
+        f.setPixelSize(12)
+        painter.setFont(f)
+        painter.setPen(QColor(C.TEXT))
+        y = r.top() + 20
+        for i, line in enumerate(lines):
+            if i == 0:
+                painter.setPen(QColor(C.TEXT_DIM))
+            painter.drawText(QPointF(r.left() + 12, y), line)
+            painter.setPen(QColor(C.TEXT))
+            y += 21
         painter.restore()
 
     def _paint_region_frame(self, painter, rect, selecting=False):

@@ -1,10 +1,10 @@
-"""Optional MyPaint brush engine through libmypaint (comparison prototype).
+"""The brush engine: libmypaint, through ctypes.
 
-Uses crit_overlay/mypaint/mypaint.dll when present (built by
-third_party/libmypaint/build_libmypaint.py); without it the engine simply
-isn't offered. libmypaint does all the brush work: dynamics, smoothing
-("slow tracking"), dab shapes, textures and jitter from standard .myb brush
-files. We feed it raw input events and read back its surface.
+crit_overlay/mypaint/mypaint.dll is built by
+third_party/libmypaint/build_libmypaint.py and is a required part of the
+build. libmypaint does all the brush work: dynamics, smoothing ("slow
+tracking"), dab shapes, textures and jitter from standard .myb brush files.
+We feed it input events and read back its surface.
 
 A stroke records the events it was drawn with (position, pressure, time
 step) so it can be replayed exactly: a fresh brush from the same .myb file
@@ -26,24 +26,7 @@ from PySide6.QtGui import QImage, QPixmap
 logger = logging.getLogger(__name__)
 
 DIR = Path(__file__).resolve().parent / "mypaint"
-PREFIX = "mypaint:"
 MOUSE_PRESSURE = 1.0   # full pressure, like the dab engine, so a mouse line matches the ring
-
-# Radius per unit of size for each bundled brush, measured so that its
-# visible line (half its peak opacity) at full pressure is as wide as the
-# size. Brushes differ a lot by design (Textured Ink scatters far past its
-# radius, Airbrush fades well inside it).
-SIZE_SCALE = {
-    "deevad_ballpen.myb": 1.26,
-    "deevad_liner.myb": 1.02,
-    "tanda_pencil-2b.myb": 1.07,
-    "deevad_4H_pencil.myb": 1.2,
-    "classic_textured_ink.myb": 0.3,
-    "classic_calligraphy.myb": 1.5,
-    "tanda_charcoal-01.myb": 0.62,
-    "tanda_marker-01.myb": 0.85,
-    "deevad_airbrush.myb": 1.8,
-}
 
 # Windows Ink reports tilt in degrees, about -60..60; libmypaint wants -1..1.
 TILT_RANGE = 60.0
@@ -54,11 +37,33 @@ def tilt(x_degrees, y_degrees):
     return clamp(x_degrees), clamp(y_degrees)
 _GRID = 4              # see dab._GRID
 
-MypaintSpec = namedtuple("MypaintSpec", "engine brush")
+# brush: the .myb file. size_pressure / opacity_pressure: whether pen
+# pressure drives size and opacity (the app's own mappings, replacing the
+# brush's pressure curves for those two settings). tweaks: base values to
+# override, as ((setting, value), ...).
+MypaintSpec = namedtuple("MypaintSpec", "engine brush size_pressure opacity_pressure tweaks scale",
+                         defaults=(True, True, (), 1.0))
+
+# Pressure -> size: diameter at zero pressure, as a fraction of full size.
+MIN_SIZE_FRACTION = 0.12
+# Pressure -> opacity off still stops painting at exactly zero pressure
+# (the pen lifting), then jumps straight to full.
+_OPACITY_STEP = 0.015
 
 
-def spec(brush_file):
-    return MypaintSpec("mypaint", brush_file)
+def spec(brush_file, size_pressure=True, opacity_pressure=True, tweaks=(), scale=1.0):
+    """scale: brush radius per unit of size, measured per preset so the
+    visible line at full pressure is as wide as the size."""
+    return MypaintSpec("mypaint", brush_file, bool(size_pressure), bool(opacity_pressure), tuple(tweaks),
+                       float(scale))
+
+
+def diameter_fraction(spec_, pressure):
+    """Diameter at `pressure` as a fraction of full size, under our mapping."""
+    if not getattr(spec_, "size_pressure", True):
+        return 1.0
+    p = max(0.0, min(1.0, pressure))
+    return math.exp(math.log(MIN_SIZE_FRACTION) * (1.0 - p))
 
 
 def is_spec(brush):
@@ -95,6 +100,9 @@ def _load():
             "mypaint_brush_set_base_value": ([vp, i, f], None),
             "mypaint_brush_get_base_value": ([vp, i], f),
             "mypaint_brush_setting_from_cname": ([ctypes.c_char_p], i),
+            "mypaint_brush_input_from_cname": ([ctypes.c_char_p], i),
+            "mypaint_brush_set_mapping_n": ([vp, i, i, i], None),
+            "mypaint_brush_set_mapping_point": ([vp, i, i, i, f, f], None),
             "mypaint_surface_begin_atomic": ([vp], None),
             "mypaint_surface_end_atomic": ([vp, ctypes.POINTER(_Rect)], None),
             "mypaint_surface_unref": ([vp], None),
@@ -106,7 +114,12 @@ def _load():
             fn.argtypes = args
             fn.restype = res
         lib.settings = {n: lib.mypaint_brush_setting_from_cname(n.encode())
-                        for n in ("radius_logarithmic", "color_h", "color_s", "color_v")}
+                        for n in ("radius_logarithmic", "color_h", "color_s", "color_v", "opaque_multiply",
+                                  "eraser", "lock_alpha", "slow_tracking", "slow_tracking_per_dab", "opaque")}
+        lib.all_inputs = [i for i in (lib.mypaint_brush_input_from_cname(n.encode()) for n in (
+            "pressure", "speed1", "speed2", "random", "stroke", "direction", "tilt_declination",
+            "tilt_ascension", "custom")) if i >= 0]
+        lib.pressure_input = lib.mypaint_brush_input_from_cname(b"pressure")
         _lib = lib
     except (OSError, AttributeError):
         logger.exception("Couldn't load %s; the MyPaint engine is unavailable", path)
@@ -118,22 +131,12 @@ def available():
     return _load() is not None
 
 
-def brushes():
-    """[(preset key, label)] for the bundled brushes."""
-    index = DIR / "brushes" / "index.txt"
-    if not available() or not index.exists():
-        return []
-    out = []
-    for line in index.read_text(encoding="utf-8").splitlines():
-        if "\t" in line:
-            name, label = line.split("\t", 1)
-            out.append((PREFIX + name, label))
-    return out
-
-
 def _json(brush_file):
     if brush_file not in _brush_json:
-        _brush_json[brush_file] = (DIR / "brushes" / brush_file).read_bytes()
+        path = Path(brush_file)
+        if not path.is_absolute():
+            path = DIR / "brushes" / brush_file
+        _brush_json[brush_file] = path.read_bytes()
     return _brush_json[brush_file]
 
 
@@ -163,7 +166,7 @@ class StrokePainter:
         # stroke units) at this pixel density; its pressure curves still
         # scale it from there.
         s = lib.settings
-        scale = SIZE_SCALE.get(stroke.brush.brush, 1.0)
+        scale = getattr(stroke.brush, "scale", 1.0)
         lib.mypaint_brush_set_base_value(self.brush, s["radius_logarithmic"],
                                          math.log(max(0.2, stroke.size * scale * self.dpr / 2.0)))
         c = stroke.color
@@ -171,11 +174,58 @@ class StrokePainter:
         lib.mypaint_brush_set_base_value(self.brush, s["color_h"], 0.0 if h < 0 else h)
         lib.mypaint_brush_set_base_value(self.brush, s["color_s"], c.hsvSaturationF())
         lib.mypaint_brush_set_base_value(self.brush, s["color_v"], c.valueF())
+        sp = stroke.brush
+        for name, value in getattr(sp, "tweaks", ()):
+            sid = lib.mypaint_brush_setting_from_cname(name.encode())
+            if sid >= 0:
+                lib.mypaint_brush_set_base_value(self.brush, sid, float(value))
+        # Each stroke paints on its own transparent surface; an eraser stroke
+        # becomes a coverage mask the canvas subtracts. libmypaint's own
+        # eraser mode would erase that empty surface instead, so it's off.
+        lib.mypaint_brush_set_base_value(self.brush, s["eraser"], 0.0)
+        lib.mypaint_brush_set_base_value(self.brush, s["lock_alpha"], 0.0)
+        # Smoothing is the app's one Stabilize setting, the same for every
+        # brush; a brush's own slow tracking would trail the pen and end
+        # strokes short of where it lifted.
+        for name in ("slow_tracking", "slow_tracking_per_dab"):
+            lib.mypaint_brush_set_base_value(self.brush, s[name], 0.0)
+            for inp in lib.all_inputs:
+                lib.mypaint_brush_set_mapping_n(self.brush, s[name], inp, 0)
+        self._apply_pressure(sp)
         lib.mypaint_brush_reset(self.brush)
         lib.mypaint_brush_new_stroke(self.brush)
         self.surface = lib.crit_surface_new()
         self.bbox = None  # device (x0, y0, x1, y1) painted so far
         self.started = False
+
+    def _apply_pressure(self, sp):
+        """Our pressure -> size and pressure -> opacity, independent of
+        each other and of the brush's other dynamics (speed, tilt, random,
+        which stay as the brush defines them). The Soft/Normal/Firm response
+        is already in the pressure values."""
+        lib, s, pin = self.lib, self.lib.settings, self.lib.pressure_input
+        radius = s["radius_logarithmic"]
+        if getattr(sp, "size_pressure", True):
+            lib.mypaint_brush_set_mapping_n(self.brush, radius, pin, 2)
+            lib.mypaint_brush_set_mapping_point(self.brush, radius, pin, 0, 0.0, math.log(MIN_SIZE_FRACTION))
+            lib.mypaint_brush_set_mapping_point(self.brush, radius, pin, 1, 1.0, 0.0)
+        else:
+            lib.mypaint_brush_set_mapping_n(self.brush, radius, pin, 0)
+        # Opacity: our opaque_multiply curve is the only pressure link (a
+        # brush's own pressure -> opaque curve would make "off" not off).
+        # Pressure links that shape texture (hardness, scatter) stay.
+        lib.mypaint_brush_set_mapping_n(self.brush, s["opaque"], pin, 0)
+        om = s["opaque_multiply"]
+        lib.mypaint_brush_set_base_value(self.brush, om, 0.0)
+        if getattr(sp, "opacity_pressure", True):
+            lib.mypaint_brush_set_mapping_n(self.brush, om, pin, 2)
+            lib.mypaint_brush_set_mapping_point(self.brush, om, pin, 0, 0.0, 0.0)
+            lib.mypaint_brush_set_mapping_point(self.brush, om, pin, 1, 1.0, 1.0)
+        else:
+            lib.mypaint_brush_set_mapping_n(self.brush, om, pin, 3)
+            lib.mypaint_brush_set_mapping_point(self.brush, om, pin, 0, 0.0, 0.0)
+            lib.mypaint_brush_set_mapping_point(self.brush, om, pin, 1, _OPACITY_STEP, 1.0)
+            lib.mypaint_brush_set_mapping_point(self.brush, om, pin, 2, 1.0, 1.0)
 
     def add(self, events):
         """events: [(x, y, pressure, dtime, xtilt, ytilt)] in stroke units.
@@ -190,7 +240,8 @@ class StrokePainter:
             lib.mypaint_brush_stroke_to(self.brush, self.surface, x, y, 0.0, 0.0, 0.0, 10.0)
             self.started = True
         for x, y, pressure, dt, xt, yt in events:
-            lib.mypaint_brush_stroke_to(self.brush, self.surface, x * d, y * d, pressure, xt, yt, dt)
+            # libmypaint complains about (and mishandles) a zero time step.
+            lib.mypaint_brush_stroke_to(self.brush, self.surface, x * d, y * d, pressure, xt, yt, max(dt, 0.001))
         roi = _Rect()
         lib.mypaint_surface_end_atomic(self.surface, ctypes.byref(roi))
         if roi.width <= 0 or roi.height <= 0:
@@ -252,5 +303,5 @@ def stroke_layer(stroke, dpr):
 
 def bounds_pad(stroke):
     # Brushes can scatter dabs a few radii from the line.
-    return stroke.size * SIZE_SCALE.get(stroke.brush.brush, 1.0) * 3 + 8
+    return stroke.size * getattr(stroke.brush, "scale", 1.0) * 3 + 8
 
