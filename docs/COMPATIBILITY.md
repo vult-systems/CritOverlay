@@ -97,7 +97,7 @@ exercises the toolbar and pass-through (see `crit_overlay/selftest.py`).
 
 ## Known limitations (v1.5.0)
 
-v1.5.0 is feature-frozen at v1.5.0-rc.4 (see `CLAUDE.md`). These ship as
+v1.5.0 is feature-frozen at v1.5.0-rc.5 (see `CLAUDE.md`). These ship as
 they are; each is either by design or tracked for after v1.5.0 (#19).
 "From the code" means it follows from reading the code but hasn't been run.
 
