@@ -202,7 +202,7 @@ for something you launch and close all day, and is blocked outright on
 machines that don't allow running programs from `%TEMP%`.
 
 Prebuilt versions are on the [releases
-page](https://github.com/vult-systems/CritOverlay/releases). v1.4.2 is the
+page](https://github.com/vult-systems/crit-overlay/releases). v1.4.2 is the
 current stable release. v1.5.0 release candidates (`v1.5.0-rc.N`) are
 marked as pre-releases until they pass the hardware and lab-machine
 checks in [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md#manual-validation-required-before-release).
