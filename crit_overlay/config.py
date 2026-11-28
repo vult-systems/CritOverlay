@@ -126,7 +126,18 @@ class AppConfig:
             "eraser_opacity": _clamp(self._value("brush/eraser_opacity", 1.0, float), 0.05, 1.0),
             "recent_colors": self._colors("brush/recent_colors", C.RECENT_COLORS),
             "favorite_colors": self._colors("brush/favorite_colors", C.FAVORITE_COLORS),
+            "toolbar_positions": self._positions(),
         }
+
+    def _positions(self):
+        """Toolbar position per monitor: {monitor key: (x, y)} relative to
+        the monitor's top-left."""
+        import json
+        try:
+            raw = json.loads(self._value("ui/toolbar_positions", "{}", str))
+            return {str(k): (int(v[0]), int(v[1])) for k, v in raw.items()}
+        except (ValueError, TypeError, KeyError, IndexError, AttributeError):
+            return {}
 
     def _colors(self, key, limit):
         raw = self._value(key, "", str)
@@ -172,7 +183,8 @@ class AppConfig:
              margin_color=C.DEFAULT_MARGIN_COLOR, margin_opacity=C.DEFAULT_MARGIN_OPACITY,
              text_family=None, text_size=C.DEFAULT_TEXT_SIZE, text_bold=False, text_align="left",
              eraser_size=None, brush_preset=None, brush_tuning=None, pressure_curve=None,
-             eraser_style=None, eraser_opacity=None, recent_colors=None, favorite_colors=None):
+             eraser_style=None, eraser_opacity=None, recent_colors=None, favorite_colors=None,
+             toolbar_positions=None):
         self._settings.setValue("brush/color", QColor(color).name())
         self._settings.setValue("brush/size", round(float(size), 2))
         if eraser_size is not None:
@@ -189,6 +201,10 @@ class AppConfig:
             self._settings.setValue("brush/recent_colors", ",".join(recent_colors))
         if favorite_colors is not None:
             self._settings.setValue("brush/favorite_colors", ",".join(favorite_colors))
+        if toolbar_positions is not None:
+            import json
+            self._settings.setValue("ui/toolbar_positions",
+                                    json.dumps({k: list(v) for k, v in toolbar_positions.items()}))
         for key, (h, s) in (brush_tuning or {}).items():
             self._settings.setValue(f"brush/{key}_hardness", round(float(h), 3))
             self._settings.setValue(f"brush/{key}_spacing", round(float(s), 3))

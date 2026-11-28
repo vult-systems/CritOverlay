@@ -375,6 +375,7 @@ LUCIDE = {
     "region": "scan", "margin": "sliders-horizontal", "folder": "folder-open", "clear": "trash-2",
     "exit": "x", "hide": "chevron-down", "settings": "settings",
     "chevron_down": "chevron-down", "chevron_right": "chevron-right",
+    "fit": "minimize-2", "actual": "zoom-in",
 }
 LUCIDE_STROKE = 1.75  # a touch lighter than Lucide's 2, for 20 px on a dark bar
 _svg_cache = {}

@@ -1,8 +1,11 @@
 """Stroke previews for brush tiles, drawn by the brush engines themselves.
 
-Each preview is the same S-curve with a pressure swell (thin, full, thin),
-so brushes compare like for like: taper, edge, texture and density are what
-the brush really paints. Cached per brush, color, size and pixel density.
+Every brush paints the same standardized stroke, so they compare like for
+like: a light entry, a firm downstroke, a dip at a change of direction, a
+second swell and a long taper, at a hand-like varying speed. What shows is
+what the brush really paints (taper, edge, texture, density, and for MyPaint
+brushes their speed and direction response). Cached per brush, color, size
+and pixel density.
 """
 
 import math
@@ -17,17 +20,32 @@ from .models import Stroke
 _cache = {}
 
 
+def _pressure(t):
+    """Light entry, firm, a dip at the turn, a second swell, a long taper."""
+    def bump(c, width):
+        return math.exp(-((t - c) / width) ** 2)
+    p = 0.95 * bump(0.28, 0.17) + 0.8 * bump(0.68, 0.16) + 0.25 * bump(0.48, 0.3)
+    return max(0.04, min(1.0, p)) * min(1.0, t / 0.06 + 0.2) * min(1.0, (1 - t) / 0.18 + 0.05)
+
+
 def _stroke(key, color, w, h, size):
     s = Stroke(QColor(color), size, 1.0)
-    n = 90
+    n = 160
     pad = size * 0.9 + 2
-    pts = []
+    amp = (h / 2 - pad)
+    pts, dts = [], []
+    prev = None
     for i in range(n + 1):
         t = i / n
+        # One and a half waves, the second smaller: down, up, and a hook.
         x = pad + t * (w - 2 * pad)
-        y = h / 2 + (h / 2 - pad) * 0.55 * math.sin(t * math.pi * 2)
-        pressure = 0.15 + 0.85 * math.sin(t * math.pi) ** 0.7
-        pts.append((QPointF(x, y), pressure))
+        y = h / 2 + amp * 0.75 * math.sin(t * math.pi * 3) * (1 - 0.45 * t)
+        p = QPointF(x, y)
+        pts.append((p, _pressure(t)))
+        # Time steps follow the speed a hand would have: slower at the turns.
+        step = 0.0 if prev is None else math.hypot(x - prev.x(), y - prev.y())
+        dts.append(0.0 if prev is None else 0.004 + step * 0.0012)
+        prev = p
     if key == dab.CLASSIC:
         s.points = [(p, brush.effective_pressure(pr, 0.0)) for p, pr in pts]
     elif key.startswith(mp.PREFIX):
@@ -35,7 +53,7 @@ def _stroke(key, color, w, h, size):
             return None
         s.brush = mp.spec(key[len(mp.PREFIX):])
         s.points = pts
-        s.dtimes = [0.0] + [0.006] * n
+        s.dtimes = dts
     else:
         s.brush = dab.make_spec(key)
         s.points = pts

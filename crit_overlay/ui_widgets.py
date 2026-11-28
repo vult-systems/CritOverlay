@@ -69,7 +69,7 @@ class ScrubField(QWidget):
     PX_PER_RANGE = 260  # dragging this far covers the whole range
 
     def __init__(self, caption, lo, hi, to_pos, from_pos, fmt, parse, step, tooltip="", parent=None,
-                 positions=1000, width=78):
+                 positions=1000, width=88):
         super().__init__(parent)
         self.caption = caption
         self.lo, self.hi = lo, hi
@@ -79,7 +79,7 @@ class ScrubField(QWidget):
         self._press = None
         self._scrubbing = False
         self._hover = False
-        self.setFixedSize(width, 28)
+        self.setFixedSize(width, 30)
         self.setCursor(Qt.CursorShape.SizeHorCursor)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setToolTip(tooltip)
@@ -189,25 +189,26 @@ class ScrubField(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(255, 255, 255, 30 if (self._hover or self._scrubbing) else 16))
+        p.setPen(QColor(255, 255, 255, 46 if (self._hover or self._scrubbing) else 26))
+        p.setBrush(QColor(255, 255, 255, 34 if (self._hover or self._scrubbing) else 20))
         p.drawRoundedRect(r, 7, 7)
+        p.setPen(Qt.PenStyle.NoPen)
         # A hairline showing where the value sits in its range.
         span = max(1, self.slider.maximum() - self.slider.minimum())
         frac = (self._to_pos(self._value) - self.slider.minimum()) / span
-        p.setBrush(QColor(255, 255, 255, 70))
+        p.setBrush(QColor(255, 255, 255, 110))
         p.drawRoundedRect(QRectF(r.left() + 6, r.bottom() - 4, (r.width() - 12) * frac, 2), 1, 1)
         f = QFont(self.font())
-        f.setPixelSize(10)
-        f.setWeight(QFont.Weight.DemiBold)
-        p.setFont(f)
-        p.setPen(QColor(C.TEXT_DIM))
-        p.drawText(r.adjusted(8, 0, 0, -2), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                   self.caption)
-        f.setPixelSize(12)
+        f.setPixelSize(11)
         f.setWeight(QFont.Weight.Normal)
         p.setFont(f)
-        p.setPen(QColor(C.TEXT))
+        p.setPen(QColor("#a9a9b2"))
+        p.drawText(r.adjusted(8, 0, 0, -2), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                   self.caption)
+        f.setPixelSize(13)
+        f.setWeight(QFont.Weight.DemiBold)
+        p.setFont(f)
+        p.setPen(QColor("#f4f4f6"))
         p.drawText(r.adjusted(0, 0, -8, -2), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
                    self.text())
         p.end()
@@ -331,6 +332,13 @@ class MenuRow(QPushButton):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._shortcut = shortcut
 
+    def set_shortcut(self, text):
+        self._shortcut = text
+        self.update()
+
+    def shortcut_text(self):
+        return self._shortcut
+
     def paintEvent(self, e):
         super().paintEvent(e)
         if self._shortcut:
@@ -339,3 +347,47 @@ class MenuRow(QPushButton):
             p.drawText(self.rect().adjusted(0, 0, -10, 0), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                        self._shortcut)
             p.end()
+
+
+class ToolbarGrip(QWidget):
+    """The toolbar's drag handle: drag to move the toolbar, double-click to
+    put it back."""
+
+    def __init__(self, parent, on_move, on_release, on_reset):
+        super().__init__(parent)
+        self._on_move, self._on_release, self._on_reset = on_move, on_release, on_reset
+        self._grab = None
+        self.setFixedSize(14, 30)
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(255, 255, 255, 90))
+        for row in range(3):
+            for col in range(2):
+                p.drawEllipse(QRectF(3.5 + col * 5, 8 + row * 5, 2.4, 2.4))
+        p.end()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            # Where in the toolbar the press landed, so it doesn't jump.
+            self._grab = self.mapTo(self.parentWidget(), e.position().toPoint())
+        e.accept()
+
+    def mouseMoveEvent(self, e):
+        if self._grab is not None:
+            self._on_move(e.globalPosition().toPoint(), self._grab)
+        e.accept()
+
+    def mouseReleaseEvent(self, e):
+        if self._grab is not None:
+            self._grab = None
+            self._on_release()
+        e.accept()
+
+    def mouseDoubleClickEvent(self, e):
+        self._grab = None
+        self._on_reset()
+        e.accept()

@@ -179,6 +179,8 @@ FIELD_STYLE = """
 
 TOAST_STYLE = """
     QLabel {
+        font-family: "Segoe UI", "IBM Plex Sans";
+        font-size: 12px;
         color: #eeeeef;
         background: rgba(17,17,19,235);
         border: 1px solid #303035;

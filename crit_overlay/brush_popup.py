@@ -112,7 +112,7 @@ class BrushPopup(QFrame):
         for purpose, key, label, recommended in items:
             if recommended:
                 featured.addWidget(self._tile(key, purpose + chr(10) + label, f"{label}. Engine: {_engine(key)}",
-                                              108, 40, dpr, bold=True))
+                                              136, 44, dpr, bold=True))
         outer.addLayout(featured)
 
         others = [(p, k, label) for p, k, label, rec in items if not rec]
@@ -122,7 +122,7 @@ class BrushPopup(QFrame):
             grid.setContentsMargins(0, 0, 0, 0)
             grid.setSpacing(4)
             for i, (purpose, key, label) in enumerate(others):
-                grid.addWidget(self._tile(key, label, f"{purpose}: {label}. Engine: {_engine(key)}", 84, 28, dpr),
+                grid.addWidget(self._tile(key, label, f"{purpose}: {label}. Engine: {_engine(key)}", 108, 32, dpr),
                                i // 5, i % 5)
             self.more = Collapsible("Experimental brushes", grid_host,
                                     expanded=getattr(overlay, "_brush_more_expanded", False))

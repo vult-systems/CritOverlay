@@ -4,12 +4,13 @@ import subprocess
 import time
 from datetime import datetime
 
-from PySide6.QtCore import QMimeData, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal, QEvent
+from PySide6.QtCore import QMimeData, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal, QEvent
 from PySide6.QtGui import (
     QAction,
     QColor,
     QCursor,
     QFont,
+    QFontMetricsF,
     QIcon,
     QGuiApplication,
     QKeySequence,
@@ -54,7 +55,7 @@ from .pass_through_badge import PassThroughBadge
 from .region_popup import RegionPopup
 from .shape_popup import SHAPE_LABELS, ShapePopup
 from .text_edit import TextEditor
-from .ui_widgets import MenuRow, percent_field, place_popup, px_field, size_field
+from .ui_widgets import MenuRow, ToolbarGrip, percent_field, place_popup, px_field, size_field
 from .color_popup import swatch_icon
 from . import brush_preview
 
@@ -267,6 +268,11 @@ class Overlay(QWidget):
         self._color_popup = None
         text_fonts.load()
         self._ui_hidden = False
+        self._adjust = None          # Alt+right-drag size/opacity, {"anchor", "size", "opacity"}
+        self._peek = False           # H held: annotations hidden (before/after)
+        self._alt_pick = False       # Alt held: Alt+click picks a color
+        self._mid_pan = False        # middle-button pan in progress
+        self._toolbar_positions = dict(saved.get("toolbar_positions", {}))
         self.panel = self._build_panel()
         self.prefs_popup = self._build_prefs()
         self.more_menu = self._build_more_menu()
@@ -549,10 +555,24 @@ class Overlay(QWidget):
     def _anchor_local_rect(self):
         return self._anchor_screen().geometry().translated(-self.geometry().topLeft())
 
+    def _monitor_key(self):
+        s = self._anchor_screen()
+        g = s.geometry()
+        return f"{s.name()}@{g.x()},{g.y()},{g.width()}x{g.height()}"
+
+    def _clamp_panel(self, x, y, local):
+        x = max(local.x() + 4, min(x, local.x() + local.width() - self.panel.width() - 4))
+        y = max(local.y() + 4, min(y, local.y() + local.height() - self.panel.height() - 4))
+        return x, y
+
     def _place_chrome(self):
         local = self._anchor_local_rect()
-        panel_x = local.x() + max(16, (local.width() - self.panel.width()) // 2)
-        panel_y = local.y() + C.PANEL_MARGIN_TOP
+        saved = self._toolbar_positions.get(self._monitor_key())
+        if saved is not None:
+            panel_x, panel_y = self._clamp_panel(local.x() + saved[0], local.y() + saved[1], local)
+        else:
+            panel_x = local.x() + max(16, (local.width() - self.panel.width()) // 2)
+            panel_y = local.y() + C.PANEL_MARGIN_TOP
         self.panel.move(panel_x, panel_y)
         below = panel_y + self.panel.height()
         self._toast_anchor = (local, below + C.TOAST_GAP)
@@ -572,9 +592,56 @@ class Overlay(QWidget):
         badge.move(x, y)
 
     def _position_toast(self):
-        local, y = self._toast_anchor
-        x = local.x() + max(16, (local.width() - self.toast_label.width()) // 2)
-        self.toast_label.move(x, y)
+        """Under the toolbar, unless that would cover the captured artwork;
+        then above the toolbar or at the bottom of the monitor, whichever
+        stays clear of it."""
+        local, y_below = self._toast_anchor
+        t = self.toast_label
+        x = local.x() + max(16, (local.width() - t.width()) // 2)
+        panel = self.panel.geometry()
+        candidates = [
+            QPoint(panel.x() + (panel.width() - t.width()) // 2, y_below),
+            QPoint(panel.x() + (panel.width() - t.width()) // 2, panel.y() - C.TOAST_GAP - t.height()),
+            QPoint(x, local.y() + local.height() - t.height() - 24),
+        ]
+        art = self._artwork_view_rect()
+        chosen = candidates[0]
+        if art is not None:
+            def overlap(c):
+                r = QRect(c, t.size())
+                if not local.contains(r):
+                    return 1 << 30
+                i = r.intersected(art)
+                return 0 if i.isEmpty() else i.width() * i.height()
+            chosen = min(candidates, key=overlap)  # first wins ties
+        chosen.setX(max(local.x() + 8, min(chosen.x(), local.x() + local.width() - t.width() - 8)))
+        t.move(chosen)
+
+    def _artwork_view_rect(self):
+        """The captured image on screen (the margin around it is fine to
+        cover)."""
+        if getattr(self, "capture", None) is None:
+            return None
+        return self.capture.transform().mapRect(QRectF(self.capture.image_rect())).toAlignedRect()
+
+    def _grip_moved(self, global_pos, grab_offset):
+        local = self._anchor_local_rect()
+        p = self.mapFromGlobal(global_pos) - grab_offset
+        x, y = self._clamp_panel(p.x(), p.y(), local)
+        self.panel.move(x, y)
+        self._toast_anchor = (local, y + self.panel.height() + C.TOAST_GAP)
+        if self.toast_label.isVisible():
+            self._position_toast()
+
+    def _grip_released(self):
+        local = self._anchor_local_rect()
+        self._toolbar_positions[self._monitor_key()] = (self.panel.x() - local.x(), self.panel.y() - local.y())
+        self._save_settings()
+
+    def _grip_reset(self):
+        self._toolbar_positions.pop(self._monitor_key(), None)
+        self._place_chrome()
+        self._save_settings()
 
     # -- UI construction -----------------------------------------------
 
@@ -685,6 +752,9 @@ class Overlay(QWidget):
         def tool(icon_name, tooltip, checkable=False):
             return self._tool_button(panel, icon_name, tooltip, checkable, top)
 
+        self.grip = ToolbarGrip(panel, self._grip_moved, self._grip_released, self._grip_reset)
+        self._hoverable(self.grip, "Drag to move the toolbar (remembered per monitor). Double-click to reset")
+        top.addWidget(self.grip)
         self.select_btn = tool("select", "Select and move (V)", True)
         self.brush_btn = tool("brush", "Brush (B). Click again to choose a brush", True)
         self.eraser_btn = tool("eraser", "Eraser (E). Click again for hard or soft", True)
@@ -832,7 +902,7 @@ class Overlay(QWidget):
 
         w, h = section("opacity")
         self.opacity_value_label = percent_field("Opacity", 5, 100, "Opacity: drag, scroll or click", w)
-        self.opacity_value_label.setFixedWidth(92)
+        self.opacity_value_label.setFixedWidth(110)
         self.opacity_value_label.setValue(int(self.opacity * 100), emit=False)
         self.opacity_value_label.valueChanged.connect(self._set_opacity)
         self.opacity_slider = self.opacity_value_label.slider
@@ -871,6 +941,11 @@ class Overlay(QWidget):
             widest = max(widest, total)
         top = self.panel.layout().itemAt(0).layout().sizeHint().width()
         self.panel.setFixedWidth(max(widest, top) + 12)
+        # And one height: the properties row is always shown with the bar.
+        was_hidden = self.props_bar.isHidden()
+        self.props_bar.setVisible(True)
+        self.panel.setFixedHeight(self.panel.layout().sizeHint().height())
+        self.props_bar.setVisible(not was_hidden)
 
     def _return_focus(self):
         self.setFocus()
@@ -990,6 +1065,9 @@ class Overlay(QWidget):
         self.backdrop_opacity_value_label.setObjectName("SliderValue")
         h.addWidget(self.backdrop_opacity_value_label)
         v.addLayout(h)
+        self.fit_btn = item("fit", "Fit capture to screen", "Ctrl+0", "Frame the whole capture", self.frame_capture)
+        self.actual_btn = item("actual", "Actual pixels", "Ctrl+1", "One image pixel per screen pixel",
+                               self.actual_pixels)
         self.clear_btn = item("clear", "Clear all", "", "Remove every annotation (undoable)", self.clear)
 
         self._menu_heading(menu, v, "EXPORT")
@@ -1068,6 +1146,11 @@ class Overlay(QWidget):
         place_popup(self.prefs_popup, self.more_btn, align="right")
 
     def _show_more_menu(self):
+        # Esc discards a capture rather than hiding, so only show it as
+        # the shortcut when it really does what the item says.
+        self.exit_btn.set_shortcut("" if self.capture is not None else "Esc")
+        for b in (self.fit_btn, self.actual_btn):
+            b.setEnabled(self.capture is not None)
         self.pass_btn.setChecked(self.pass_through)
         self._refresh_region_button()
         place_popup(self.more_menu, self.more_btn, align="right")
@@ -1281,6 +1364,11 @@ class Overlay(QWidget):
     _TEXT_PASSTHROUGH_KEYS = (Qt.Key.Key_F7, Qt.Key.Key_F8, Qt.Key.Key_F9)
 
     def event(self, event):
+        # Trackpad pinch zooms a capture around the fingers.
+        if (event.type() == QEvent.Type.NativeGesture and getattr(self, "capture", None) is not None
+                and event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture):
+            self.zoom_at(event.position(), 1.0 + event.value())
+            return True
         # While typing, claim every key before the application shortcuts
         # see it, so B, E, [ and the rest type instead of switching tools.
         if (event.type() == QEvent.Type.ShortcutOverride and getattr(self, "_text_edit", None) is not None
@@ -1548,6 +1636,11 @@ class Overlay(QWidget):
         add("Ctrl+D", self.duplicate_selection)
         add("Delete", self.delete_selection)
         add("Tab", self.toggle_interface)
+        add("Ctrl+0", self.frame_capture)
+        add("Ctrl+1", self.actual_pixels)
+        add("Ctrl+=", lambda: self.zoom_by(1.25))
+        add("Ctrl++", lambda: self.zoom_by(1.25))
+        add("Ctrl+-", lambda: self.zoom_by(0.8))
         add("Ctrl+Z", self.undo)
         add("Ctrl+Shift+Z", self.redo)
         add("F7", self.move_to_next_screen)
@@ -1604,6 +1697,7 @@ class Overlay(QWidget):
             eraser_opacity=self.eraser_opacity,
             recent_colors=self.recent_colors,
             favorite_colors=self.favorite_colors,
+            toolbar_positions=self._toolbar_positions,
         )
 
     # State setters. Every mutable tool property goes through one of these,
@@ -1859,9 +1953,10 @@ class Overlay(QWidget):
     def _on_smoothing_slider_changed(self, v):
         self._set_smoothing(v)
 
-    def _set_color(self, color):
+    def _set_color(self, color, remember=True):
         self.color = QColor(color)
-        self._remember_color(self.color)
+        if remember:
+            self._remember_color(self.color)
         self._sync_color_swatch()
         if hasattr(self, "preset_btn"):
             self._update_preset_chip()
@@ -2140,6 +2235,7 @@ class Overlay(QWidget):
             self.unsetCursor()
 
     def focusOutEvent(self, event):
+        self.focusOutEvent_reset_temporary()
         # Space released after Alt+Tab never reaches us; without this every
         # click would keep panning.
         if self._space_held or self._panning is not None:
@@ -2184,6 +2280,12 @@ class Overlay(QWidget):
             return
         if event.key() == Qt.Key.Key_Shift:
             self._shift_changed()
+        if event.key() == Qt.Key.Key_Alt and not event.isAutoRepeat():
+            self._set_alt_pick(True)
+        if event.key() == Qt.Key.Key_H and not event.modifiers() and not event.isAutoRepeat():
+            self._set_peek(True)
+            event.accept()
+            return
         if event.key() == Qt.Key.Key_Space:
             if not event.isAutoRepeat() and self.capture is not None and not self._selecting:
                 self._space_held = True
@@ -2205,6 +2307,12 @@ class Overlay(QWidget):
     def keyReleaseEvent(self, event):
         if event.key() == Qt.Key.Key_Shift:
             self._shift_changed()
+        if event.key() == Qt.Key.Key_Alt and not event.isAutoRepeat():
+            self._set_alt_pick(False)
+        if event.key() == Qt.Key.Key_H and not event.isAutoRepeat():
+            self._set_peek(False)
+            event.accept()
+            return
         if event.key() == Qt.Key.Key_Space:
             if not event.isAutoRepeat():
                 self._space_held = False
@@ -2220,6 +2328,150 @@ class Overlay(QWidget):
         self._selection_point = None
         self.unsetCursor()
         self.update()
+
+    # -- canvas view: zoom, frame, actual pixels -----------------------------
+    #
+    # Only the view changes (capture.scale and offset). Strokes stay in the
+    # image's own coordinates and the canvas stays at the image's pixel
+    # density, so exports are full resolution at any zoom.
+
+    ZOOM_MIN, ZOOM_MAX = 0.05, 16.0
+
+    def _zoom_anchor(self):
+        p = self.mapFromGlobal(QCursor.pos())
+        return QPointF(p) if self.rect().contains(p) else QPointF(self.width() / 2, self.height() / 2)
+
+    def zoom_percent(self):
+        """Zoom relative to actual pixels (one image pixel per screen pixel)."""
+        if self.capture is None:
+            return 100.0
+        return self.capture.scale * self._window_dpr() / max(1e-6, self.capture.dpr) * 100.0
+
+    def zoom_at(self, view_pos, factor):
+        cap = self.capture
+        if cap is None or self._grabbing or self._capturing:
+            return
+        doc = cap.to_doc(view_pos)
+        scale = max(self.ZOOM_MIN, min(self.ZOOM_MAX, cap.scale * factor))
+        self._set_view(scale, QPointF(view_pos.x() - doc.x() * scale, view_pos.y() - doc.y() * scale))
+
+    def zoom_by(self, factor):
+        self.zoom_at(self._zoom_anchor(), factor)
+
+    def _set_view(self, scale, offset):
+        cap = self.capture
+        if cap is None:
+            return
+        cap.scale = scale
+        cap.offset = offset
+        self._toast(f"{self.zoom_percent():.0f}%", 700)
+        self.update()
+
+    def frame_capture(self):
+        """Ctrl+0: the whole capture centered on the monitor."""
+        if self.capture is None:
+            return
+        self._fit_capture()
+        self._toast(f"Fit: {self.zoom_percent():.0f}%", 700)
+
+    def actual_pixels(self):
+        """Ctrl+1: one image pixel per screen pixel, around the cursor."""
+        cap = self.capture
+        if cap is None:
+            return
+        anchor = self._zoom_anchor()
+        doc = cap.to_doc(anchor)
+        scale = cap.dpr / self._window_dpr()
+        d = self._window_dpr()
+        self._set_view(scale, QPointF(capture_mod.snap(anchor.x() - doc.x() * scale, d),
+                                      capture_mod.snap(anchor.y() - doc.y() * scale, d)))
+
+    def wheelEvent(self, event):
+        # Wheel zooms around the cursor, on a capture (a live screen can't
+        # be zoomed). Trackpad pixel deltas zoom smoothly.
+        pos = self._overlay_pos(event)
+        if self.capture is None or self.pass_through or self._point_over_ui(pos):
+            event.ignore()
+            return
+        dy = event.angleDelta().y()
+        if dy:
+            self.zoom_at(pos, 1.25 ** (dy / 120.0))
+        event.accept()
+
+    # -- on-canvas size and opacity (Alt+right-drag), like Photoshop ------------
+
+    def _adjust_input(self, kind, view_pos):
+        if kind == "press":
+            if self.mode not in ("brush", "eraser") and self.mode not in SHAPES:
+                return
+            self._adjust = {"anchor": QPointF(view_pos), "size": self._active_size(),
+                            "opacity": self._active_opacity()}
+            self.cursor_pos = self._to_doc(view_pos)
+            self.setCursor(Qt.CursorShape.BlankCursor)
+            self._show_size_preview()
+        elif kind == "move" and self._adjust is not None:
+            a = self._adjust
+            dx = view_pos.x() - a["anchor"].x()
+            dy = view_pos.y() - a["anchor"].y()
+            # Sideways: size, by ratio (100 px doubles it). Up: more opaque.
+            self._set_size(a["size"] * 2 ** (dx / 100.0))
+            self._set_opacity(a["opacity"] * 100 - dy / 2.0)
+            self._show_size_preview()
+        elif kind == "release":
+            self._adjust = None
+            self.unsetCursor()
+            self._size_preview_until = 0.0
+            self.update()
+
+    def _paint_adjust_hud(self, painter):
+        a = self._adjust
+        painter.save()
+        text = f"{dab.format_size(self._active_size())}   {int(round(self._active_opacity() * 100))}%"
+        f = QFont("Segoe UI")
+        f.setPixelSize(12)
+        painter.setFont(f)
+        fm = QFontMetricsF(f)
+        w = fm.horizontalAdvance(text) + 16
+        r = QRectF(a["anchor"].x() - w / 2, a["anchor"].y() + self._ring_diameter() / 2 + 10, w, 22)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(20, 20, 23, 225))
+        painter.drawRoundedRect(r, 6, 6)
+        painter.setPen(QColor(C.TEXT))
+        painter.drawText(r, Qt.AlignmentFlag.AlignCenter, text)
+        painter.restore()
+
+    # -- temporary tools ------------------------------------------------------------
+
+    def _set_alt_pick(self, held):
+        """Holding Alt in a drawing tool turns the cursor into a picker:
+        Alt+click samples the screen color and the tool stays."""
+        held = held and self.mode in ("brush", "text") + SHAPES and self._text_edit is None
+        if held == self._alt_pick:
+            return
+        self._alt_pick = held
+        if held:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        elif not self._wants_pan() and not self._selecting:
+            self._set_mode(self.mode)  # restores the tool's own cursor
+        self.update()
+
+    def _set_peek(self, held):
+        """Hold H to see the artwork without annotations (before/after).
+        View only: nothing changes and exports are unaffected."""
+        if held == self._peek:
+            return
+        self._peek = held
+        if held:
+            self._toast("Annotations hidden while H is held", 60000)
+        else:
+            self.toast_label.hide()
+        self.update()
+
+    def focusOutEvent_reset_temporary(self):
+        self._set_peek(False)
+        self._set_alt_pick(False)
+        if self._adjust is not None:
+            self._adjust_input("release", QPointF())
 
     def _escape(self):
         # With a capture, Esc discards it and goes straight back to
@@ -2327,10 +2579,11 @@ class Overlay(QWidget):
         if self._tray_available:
             shows = f"{hotkey_text} or the tray icon" if hotkey_text else "the tray icon"
             self.exit_btn.setIcon(icons.build_icon("hide"))
-            self.exit_btn.setText("Hide")
+            self.exit_btn.setText("Hide to tray")
             self.exit_btn.setToolTip(f"Hide (Esc). {shows} shows it again")
         else:
             self.exit_btn.setIcon(icons.build_icon("exit"))
+            self.exit_btn.setText("Exit")
             self.exit_btn.setToolTip("Exit (Esc)")
 
     def dismiss(self):
@@ -2997,6 +3250,16 @@ class Overlay(QWidget):
             event.accept()
             return
 
+        if self._adjust is not None or (event_type == QEvent.Type.TabletPress
+                                        and event.button() == Qt.MouseButton.RightButton
+                                        and event.modifiers() & Qt.KeyboardModifier.AltModifier):
+            kind = {QEvent.Type.TabletPress: "press", QEvent.Type.TabletMove: "move",
+                    QEvent.Type.TabletRelease: "release"}.get(event_type)
+            if kind is not None:
+                self._adjust_input(kind, pos)
+            event.accept()
+            return
+
         pos = self._to_doc(pos)
         if event_type == QEvent.Type.TabletPress:
             is_alt = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
@@ -3039,6 +3302,16 @@ class Overlay(QWidget):
             if self.pass_through:
                 event.ignore()
                 return
+            if (event.button() == Qt.MouseButton.RightButton and event.modifiers() & Qt.KeyboardModifier.AltModifier
+                    and not self._point_over_ui(pos)):
+                self._adjust_input("press", pos)
+                event.accept()
+                return
+            if event.button() == Qt.MouseButton.MiddleButton and self.capture is not None:
+                self._mid_pan = True
+                self._pan_input("press", pos)
+                event.accept()
+                return
             if event.button() == Qt.MouseButton.LeftButton and not self._point_over_ui(pos):
                 if self._selecting:
                     self._selection_input("press", pos)
@@ -3073,7 +3346,9 @@ class Overlay(QWidget):
                 event.ignore()
                 return
             pos = self._overlay_pos(event)
-            if self._selecting:
+            if self._adjust is not None:
+                self._adjust_input("move", pos)
+            elif self._selecting:
                 if event.buttons() & Qt.MouseButton.LeftButton:
                     self._selection_input("move", pos)
             elif self._panning is not None:
@@ -3097,6 +3372,15 @@ class Overlay(QWidget):
                 return
             if self.pass_through:
                 event.ignore()
+                return
+            if self._adjust is not None and event.button() == Qt.MouseButton.RightButton:
+                self._adjust_input("release", self._overlay_pos(event))
+                event.accept()
+                return
+            if self._mid_pan and event.button() == Qt.MouseButton.MiddleButton:
+                self._mid_pan = False
+                self._pan_input("release", self._overlay_pos(event))
+                event.accept()
                 return
             if event.button() == Qt.MouseButton.LeftButton:
                 if self._selecting:
@@ -3385,7 +3669,9 @@ class Overlay(QWidget):
                 self.current is not None and self.current.eraser
                 and (self._live_layer is not None or self._live_tail is not None)
             )
-            if live_eraser:
+            if self._peek:
+                pass  # H held: the artwork alone, for a before/after look
+            elif live_eraser:
                 # The live eraser preview should reveal the backdrop through
                 # the drawing layer only. A plain DestinationOut against
                 # this shared painter would punch through the backdrop too,
@@ -3421,16 +3707,18 @@ class Overlay(QWidget):
                     self._paint_live(painter)
                     painter.restore()
 
-            if self._floating is not None:
+            if self._floating is not None and not self._peek:
                 self._paint_floating(painter, self._floating)
-            if self._text_edit is not None and not self._capturing:
+            if self._text_edit is not None and not self._capturing and not self._peek:
                 self._paint_live_text(painter)
 
             if clipped:
                 painter.restore()
             if (self.selection is not None and self._text_edit is None and not self._capturing
-                    and not self.pass_through):
+                    and not self.pass_through and not self._peek):
                 self._paint_selection(painter)
+            if self._adjust is not None and not self._capturing:
+                self._paint_adjust_hud(painter)
             if self.region is not None and not self._capturing and not self.pass_through:
                 self._paint_region_frame(painter, self.region)
             if self._selecting and self._selection_anchor is not None and not self._capturing:
