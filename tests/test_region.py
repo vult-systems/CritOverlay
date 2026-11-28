@@ -287,12 +287,17 @@ class OverlayRegionTests(OverlayCase):
         self.mouse("move", *b)
         self.mouse("release", *b)
 
-    def test_drag_selects_area_without_drawing(self):
-        self.o.begin_region_selection()
-        self.drag((800, 700), (300, 300))
-        self.assertEqual(self.o.region, QRect(300, 300, 500, 400))
-        self.assertEqual(len(self.o.history), 0)
-        self.assertFalse(self.o._selecting)
+    def test_drag_captures_area_without_drawing(self):
+        # A drag (in any direction) captures that area; see test_capture.py
+        # for the capture itself.
+        o = self.o
+        o.begin_region_selection()
+        with mock.patch.object(o, "_start_capture") as start:
+            self.drag((800, 700), (300, 300))
+        start.assert_called_once_with(QRect(300, 300, 500, 400))
+        self.assertIsNone(o.region)
+        self.assertEqual(len(o.history), 0)
+        self.assertFalse(o._selecting)
 
     def test_click_without_drag_means_full_monitor(self):
         self.set_area()
@@ -301,24 +306,26 @@ class OverlayRegionTests(OverlayCase):
         self.assertIsNone(self.o.region)
         self.assertIn("full monitor", self.toasts[-1])
 
-    def test_escape_cancels_selection_before_hiding(self):
+    def test_escape_while_selecting_ends_selection_and_hides(self):
+        # With no capture, Esc hides the overlay, also mid-selection (Esc
+        # with a capture goes back to selecting; see test_capture.py).
         o = self.o
         with mock.patch.object(o, "dismiss") as dismiss:
             o.begin_region_selection()
             self.mouse("press", 300, 300)
             o._escape()
-            dismiss.assert_not_called()
-            self.assertFalse(o._selecting)
-            self.assertIsNone(o.region)
-            o._escape()
             dismiss.assert_called_once()
+        self.assertFalse(o._selecting)
+        self.assertIsNone(o.region)
+        self.assertIsNone(o.capture)
 
     def test_selection_by_pen(self):
         o = self.o
         o.begin_region_selection()
-        for kind, (x, y) in (("press", (300, 300)), ("move", (600, 500)), ("release", (700, 600))):
-            o._selection_input(kind, QPointF(x, y))
-        self.assertEqual(o.region, QRect(300, 300, 400, 300))
+        with mock.patch.object(o, "_start_capture") as start:
+            for kind, (x, y) in (("press", (300, 300)), ("move", (600, 500)), ("release", (700, 600))):
+                o._selection_input(kind, QPointF(x, y))
+        start.assert_called_once_with(QRect(300, 300, 400, 300))
         self.assertEqual(len(o.history), 0)
 
     def test_tray_screenshot_while_hidden_keeps_the_toolbar(self):
@@ -338,6 +345,7 @@ class OverlayRegionTests(OverlayCase):
             self.assertTrue(o.panel.isHidden(), "hidden for the grab")
             later.call_args[0][1]()
         self.assertFalse(o.panel.isHidden(), "toolbar back afterwards")
+
 
     def test_toolbar_click_while_selecting_is_ignored(self):
         o = self.o
@@ -437,38 +445,46 @@ class MarginVisibilityTests(OverlayCase):
 
     def test_reported_flow_margin_visible_and_in_screenshot(self):
         # Select an area, open the popup, drag the thickness and opacity
-        # sliders (the steps from #13), then F9.
+        # sliders (the steps from #13), then F9. The area is now a centered
+        # capture, so the margin is checked around it.
         o = self.o
         o.set_margin_enabled(False)
+        screen = o._target_screen
+        dpr = screen.devicePixelRatio()
+        geo = screen.geometry()
+
+        def fake_grab(_screen, _wid=0, *_rect):
+            pm = QPixmap(round(geo.width() * dpr), round(geo.height() * dpr))
+            pm.fill(QColor(10, 200, 10))
+            pm.setDevicePixelRatio(dpr)
+            return pm
+
         o.begin_region_selection()
-        for kind, (x, y) in (("press", (400, 400)), ("move", (700, 600)), ("release", (1000, 800))):
-            o._selection_input(kind, QPointF(x, y))
+        with mock.patch.object(overlay_module.QTimer, "singleShot") as later:
+            for kind, (x, y) in (("press", (400, 400)), ("move", (700, 600)), ("release", (1000, 800))):
+                o._selection_input(kind, QPointF(x, y))
+        with mock.patch.object(type(screen), "grabWindow", fake_grab):
+            later.call_args[0][1]()
+        self.assertIsNotNone(o.capture)
         popup = self.open_popup()
         popup.size_slider.setValue(100)
         popup.opacity_slider.setValue(50)
         self.assertEqual((o.margin_size, round(o.margin_opacity, 2)), (100, 0.5))
-        r, g, b, a = self.painted(330, 600)  # 70 px left of the region, inside the 100 px margin
-        self.assertEqual((r, g, b), (255, 255, 255))
-        self.assertAlmostEqual(a, 128, delta=1)
-        self.assertLessEqual(self.painted(250, 600)[3], 1, "nothing beyond the margin")
+        # The 600 x 400 capture is centered: image from x=660, margin from x=560.
+        left = o.capture.to_view(QPointF(0, 200))
+        self.assertAlmostEqual(left.x(), 660, delta=1)
+        surround = self.painted(540, 600)
+        margin = self.painted(590, 600)  # 70 px left of the image, inside the 100 px margin
+        self.assertGreater(margin[0], surround[0] + 80, "margin visible over the surround")
+        self.assertEqual(margin[0], margin[1])
+        self.assertEqual(self.painted(700, 600)[:3], (10, 200, 10), "image")
 
-        screen = o._target_screen
-        dpr = screen.devicePixelRatio()
-
-        def fake_grab(_screen, _wid, x, y, w, h):
-            pm = QPixmap(round(w * dpr), round(h * dpr))
-            pm.fill(QColor(10, 200, 10))
-            return pm
-
-        with mock.patch.object(type(screen), "grabWindow", fake_grab):
-            shot = o.capture_region_pixmap().toImage()
-        outer = o.drawable_rect()
-        self.assertEqual(outer, QRect(300, 300, 800, 600))
-        self.assertEqual((shot.width(), shot.height()), (round(800 * dpr), round(600 * dpr)))
-        self.assertEqual(shot.pixelColor(int(50 * dpr), int(300 * dpr)).getRgb()[:3], (255, 255, 255),
-                         "margin in the screenshot")
-        self.assertEqual(shot.pixelColor(int(400 * dpr), int(300 * dpr)).getRgb()[:3], (10, 200, 10),
-                         "region in the screenshot")
+        shot = o.capture_export().toImage()
+        m = round(100 * dpr)
+        self.assertEqual((shot.width(), shot.height()), (round(600 * dpr) + 2 * m, round(400 * dpr) + 2 * m))
+        self.assertEqual(shot.pixelColor(m // 2, shot.height() // 2).getRgb(), (255, 255, 255, 255),
+                         "margin in the screenshot, opaque")
+        self.assertEqual(shot.pixelColor(m + 10, m + 10).getRgb()[:3], (10, 200, 10), "image in the screenshot")
 
     def test_margin_is_solid_at_fractional_scale(self):
         # The margin used to be four bands, each rounding its own edges at

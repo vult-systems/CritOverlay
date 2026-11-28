@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import brush
+from . import capture as capture_mod
 from . import compat
 from . import constants as C
 from . import icons
@@ -63,9 +64,12 @@ class Overlay(QWidget):
     # tray can say once where it went.
     hidden_to_tray = Signal()
 
-    def __init__(self, screen_mode="cursor", input_mode="auto", screenshot_dir=None):
+    def __init__(self, screen_mode="cursor", input_mode="auto", screenshot_dir=None, select_on_show=False):
         super().__init__()
         logger.debug("Overlay init start")
+        # Start every show in area selection (the centered capture
+        # workflow). Off for self-test and unit tests, which draw directly.
+        self.select_on_show = select_on_show
 
         self._requested_screen_mode = screen_mode
         self._target_screen = None
@@ -134,6 +138,17 @@ class Overlay(QWidget):
         self._selection_anchor = None
         self._selection_point = None
         self._capturing = False
+        # Centered capture (capture.py): a still image of a selected area,
+        # centered as a drawing workspace. While set, strokes are in its
+        # document coordinates and self.region is None.
+        self.capture = None
+        self._canvas_origin = QPointF(0, 0)
+        self._grabbing = False
+        self._space_held = False
+        self._panning = None  # (press pos, offset at press) during Space+drag
+        # Set when F9 hides the overlay after saving: the next show resumes
+        # the session instead of starting a new selection.
+        self._resume_on_show = False
         self._region_popup = None
         # Set by app.py when there is a tray icon to come back from. Without
         # one, Esc exits: a hidden overlay with no tray would be an
@@ -277,6 +292,8 @@ class Overlay(QWidget):
             if clamped != self.region:
                 logger.info("Drawing region adjusted to the new monitor size")
                 self.set_region(clamped)
+        # A capture is recentered and refitted on the new monitor.
+        self._fit_capture()
 
     def _update_geometry(self):
         self._apply_geometry()
@@ -287,6 +304,11 @@ class Overlay(QWidget):
         super().showEvent(event)
         self._alignment_retries = 1
         self._alignment_timer.start(250)
+        if self._resume_on_show:
+            # Back from a screenshot: the session as it was, no new selection.
+            self._resume_on_show = False
+        elif self.select_on_show and self.capture is None and not self._selecting and not self.pass_through:
+            QTimer.singleShot(0, self.begin_region_selection)
 
     def _check_alignment(self):
         """Compare where Windows actually put the window with where it
@@ -443,6 +465,7 @@ class Overlay(QWidget):
         # self.history to rebuild the canvas from.
         if hasattr(self, "history"):
             self._rebuild_canvas()
+            self._fit_capture()
         super().resizeEvent(event)
 
     def _anchor_screen(self):
@@ -850,21 +873,35 @@ class Overlay(QWidget):
 
     def drawable_rect(self):
         """Where strokes can start and are shown: the region plus its
-        margin, or the whole window with no region."""
+        margin, or the whole window with no region. During a capture, the
+        image plus margin in document coordinates (a QRectF)."""
+        if self.capture is not None:
+            return self._doc_outer()
         margin = self.margin_size if self.margin_enabled else 0
         return region_mod.outer_rect(self.region, margin, self.rect())
+
+    def _refresh_region_button(self):
+        if self.capture is not None:
+            s = self.capture.size()
+            self.region_btn.setChecked(True)
+            self.region_btn.setToolTip(f"Capture: {round(s.width())} x {round(s.height())} (R to capture again)")
+        elif self.region is None:
+            self.region_btn.setChecked(False)
+            self.region_btn.setToolTip("Drawing region: full monitor (R to capture an area)")
+        else:
+            self.region_btn.setChecked(True)
+            self.region_btn.setToolTip(
+                f"Drawing region: {self.region.width()} x {self.region.height()} (R to capture an area)")
 
     def set_region(self, rect):
         if self.current is not None:
             self._end_stroke()
+        if self.capture is not None:
+            self.end_capture()
         rect = region_mod.clamp_region(rect, self.rect()) if rect is not None else None
         changed = rect != self.region
         self.region = rect
-        self.region_btn.setChecked(rect is not None)
-        if rect is None:
-            self.region_btn.setToolTip("Drawing region: full monitor (R to select an area)")
-        else:
-            self.region_btn.setToolTip(f"Drawing region: {rect.width()} x {rect.height()} (R to select again)")
+        self._refresh_region_button()
         if changed:
             logger.info("Drawing region %s", "full monitor" if rect is None else
                         f"{rect.x()},{rect.y()} {rect.width()}x{rect.height()} on {self._anchor_screen().name()}")
@@ -872,15 +909,18 @@ class Overlay(QWidget):
         self.update()
 
     def begin_region_selection(self):
-        if self.pass_through:
+        if self.pass_through or self._grabbing or self._selecting:
             return
         if self.current is not None:
             self._end_stroke()
+        # Selecting again replaces the capture, like a new snip.
+        if self.capture is not None:
+            self.end_capture()
         self._selecting = True
         self._selection_anchor = None
         self._selection_point = None
         self.setCursor(Qt.CursorShape.CrossCursor)
-        self.status_changed.emit("Drag to select the drawing area. Click for full monitor, Esc to cancel")
+        self.status_changed.emit("Drag to capture an area. Click to draw on the full monitor, Esc to hide")
 
     def _finish_region_selection(self, end_pos):
         anchor = self._selection_anchor
@@ -889,11 +929,191 @@ class Overlay(QWidget):
             return
         rect = region_mod.selection_rect(anchor, end_pos, self.rect())
         if region_mod.is_usable(rect):
-            self.set_region(rect)
-            self.status_changed.emit(f"Drawing area {rect.width()} x {rect.height()}")
+            self._start_capture(rect)
         else:
             self.set_region(None)
-            self.status_changed.emit("Drawing area: full monitor")
+            self.status_changed.emit("Drawing on the full monitor. R to capture an area")
+
+    # -- centered capture ---------------------------------------------------
+
+    def _margin_px(self):
+        return self.margin_size if self.margin_enabled else 0
+
+    def _doc_outer(self):
+        return self.capture.outer_rect(self._margin_px())
+
+    def _to_doc(self, pos):
+        """Window position to stroke coordinates."""
+        return self.capture.to_doc(pos) if self.capture is not None else QPointF(pos)
+
+    def _to_view(self, pos):
+        """Stroke coordinates to window position."""
+        return self.capture.to_view(pos) if self.capture is not None else pos
+
+    def _view_scale(self):
+        return self.capture.scale if self.capture is not None else 1.0
+
+    def _fit_capture(self):
+        """Center the capture (image plus margin) on the monitor, shrunk
+        only if it doesn't fit. The image keeps its own resolution."""
+        if getattr(self, "capture", None) is None:
+            return
+        scale, offset = capture_mod.fit(self._doc_outer(), QRectF(self.rect()),
+                                        max(1.0, float(self.devicePixelRatioF())))
+        self.capture.scale = scale
+        self.capture.offset = offset
+        self.update()
+
+    def _start_capture(self, rect):
+        """Grab `rect` (window coordinates) from the screen once nothing of
+        ours is painted over it, then enter the capture."""
+        panel_vis = not self.panel.isHidden()  # its own flag; see #25
+        self._grabbing = True
+        self.panel.hide()
+        self.toast_label.hide()
+        self.hover_tip.hide()
+        self.cursor_pos = None
+        self.repaint()
+        QApplication.processEvents()
+        QTimer.singleShot(capture_mod.GRAB_DELAY_MS, lambda: self._finish_start_capture(rect, panel_vis))
+
+    def _finish_start_capture(self, rect, panel_vis):
+        grab = None
+        try:
+            screen = self._target_screen or QGuiApplication.primaryScreen()
+            r = rect.translated(self.geometry().topLeft() - screen.geometry().topLeft())
+            full = screen.grabWindow(0)
+            if full.isNull():
+                logger.error("Capture: screen grab returned nothing for %s", screen.name())
+            else:
+                # The screen's own ratio: full width / logical width is off
+                # at 175% when the logical width was rounded (1097 for 1920).
+                grab = capture_mod.crop_grab(full, r, screen.devicePixelRatio())
+                if grab.isNull():
+                    logger.error("Capture: %s is outside the grab of %s", r, screen.name())
+        except Exception:
+            logger.exception("Capture grab failed")
+        finally:
+            self._grabbing = False
+            if panel_vis and not self.pass_through:
+                self.panel.show()
+            self.update()
+        if grab is None or grab.isNull():
+            self.begin_region_selection()
+            # After the selection prompt, so it isn't replaced by it.
+            self.status_changed.emit("Capture failed, see log. Drag to try again")
+            return
+        self._enter_capture(capture_mod.Capture(grab, rect))
+
+    def _enter_capture(self, cap):
+        if self.current is not None:
+            self._end_stroke()
+        self.region = None
+        self.capture = cap
+        self.history.clear()
+        self.current = None
+        self.cursor_pos = None  # window coordinates until the next move
+        self.lazy_pos = None
+        self._fit_capture()
+        self._rebuild_canvas()
+        self._refresh_history_buttons()
+        self._refresh_region_button()
+        self._sync_region_popup()
+        self.update()
+        s = cap.size()
+        logger.info("Captured %dx%d at %gx from %s", round(s.width()), round(s.height()), cap.dpr,
+                    f"{cap.source_rect.x()},{cap.source_rect.y()}")
+        self.status_changed.emit("Space+drag moves it. F9 saves, Esc captures again")
+
+    def end_capture(self):
+        """Discard the capture and its strokes."""
+        if self.capture is None:
+            return
+        self.current = None
+        self._live_layer = None
+        self._panning = None
+        # In the capture's coordinates; meaningless once it's gone.
+        self.cursor_pos = None
+        self.lazy_pos = None
+        self.capture = None
+        self.history.clear()
+        self._rebuild_canvas()
+        self._refresh_history_buttons()
+        self._refresh_region_button()
+        self._sync_region_popup()
+        self.update()
+
+    def capture_export(self):
+        margin_fill = region_mod.margin_color(self.margin_color) if self.margin_enabled else None
+        # The backdrop as set, also during pass-through (which only hides
+        # it on screen).
+        backdrop = self._backdrop_fill(ignore_pass_through=True)
+        return capture_mod.compose_export(self.capture, self._canvas, self._canvas_origin,
+                                          self._margin_px(), margin_fill, backdrop)
+
+    def _stop_panning(self):
+        """Forget Space and any drag in progress. Called when the key or
+        mouse release may never arrive here: focus loss, pass-through, a
+        release over the toolbar."""
+        self._space_held = False
+        if self._panning is not None:
+            self._panning = None
+        if not self._selecting:
+            self.unsetCursor()
+
+    def focusOutEvent(self, event):
+        # Space released after Alt+Tab never reaches us; without this every
+        # click would keep panning.
+        if self._space_held or self._panning is not None:
+            self._stop_panning()
+        super().focusOutEvent(event)
+
+    def changeEvent(self, event):
+        if (event.type() == QEvent.Type.ActivationChange and not self.isActiveWindow()
+                and (self._space_held or self._panning is not None)):
+            self._stop_panning()
+        super().changeEvent(event)
+
+    def _pan_input(self, kind, pos):
+        """Space+drag moves the whole capture: image, margin and strokes."""
+        if kind == "press":
+            self._panning = (QPointF(pos), QPointF(self.capture.offset))
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        elif kind == "move" and self._panning is not None:
+            start, offset = self._panning
+            dpr = max(1.0, float(self.devicePixelRatioF()))
+            self.capture.offset = QPointF(capture_mod.snap(offset.x() + pos.x() - start.x(), dpr),
+                                          capture_mod.snap(offset.y() + pos.y() - start.y(), dpr))
+            self.update()
+        elif kind == "release":
+            self._panning = None
+            if self._space_held:
+                self.setCursor(Qt.CursorShape.OpenHandCursor)
+            else:
+                self.unsetCursor()
+
+    def _wants_pan(self):
+        return self.capture is not None and (self._space_held or self._panning is not None)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Space:
+            if not event.isAutoRepeat() and self.capture is not None and not self._selecting:
+                self._space_held = True
+                if self._panning is None:
+                    self.setCursor(Qt.CursorShape.OpenHandCursor)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key.Key_Space:
+            if not event.isAutoRepeat():
+                self._space_held = False
+                if self._panning is None and not self._selecting:
+                    self.unsetCursor()
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
 
     def _cancel_selection_state(self):
         self._selecting = False
@@ -903,12 +1123,18 @@ class Overlay(QWidget):
         self.update()
 
     def _escape(self):
-        # Esc cancels an area selection first; otherwise it hides the overlay.
+        # With a capture, Esc discards it and goes straight back to
+        # selecting a new area. Otherwise (selecting, or drawing on the
+        # full monitor) it hides the overlay.
+        if self._grabbing:
+            return
+        if self.capture is not None:
+            self.end_capture()
+            self.begin_region_selection()
+            return
         if self._selecting:
             self._cancel_selection_state()
-            self.status_changed.emit("Selection cancelled")
-        else:
-            self.dismiss()
+        self.dismiss()
 
     def _selection_input(self, kind, pos):
         """Mouse or pen input while selecting an area. kind: press, move,
@@ -970,7 +1196,14 @@ class Overlay(QWidget):
         # dragged (#13); Qt already merges update() calls into one paint
         # per event-loop pass. Fills and the clip only; the canvas is
         # untouched.
-        if self.region is not None:
+        if self.capture is not None:
+            # Thickness changes the canvas extent: rebuild it and recenter.
+            # Color and opacity are fills only.
+            if before != self._doc_outer():
+                self._rebuild_canvas()
+                self._fit_capture()
+            self.update()
+        elif self.region is not None:
             self.update(before.united(self.drawable_rect()).adjusted(-2, -2, 2, 2))
 
     def _sync_region_popup(self):
@@ -978,7 +1211,7 @@ class Overlay(QWidget):
             self._region_popup.sync()
 
     def _show_region_popup(self):
-        self.region_btn.setChecked(self.region is not None)
+        self._refresh_region_button()
         if self._region_popup is None:
             self._region_popup = RegionPopup(self)
         self._region_popup.show_below(self.region_btn)
@@ -1016,6 +1249,8 @@ class Overlay(QWidget):
             self._cancel_selection_state()
         if self.current is not None:
             self._end_stroke()
+        self._panning = None
+        self._space_held = False
         for popup in (self._region_popup, self._color_popup):
             if popup is not None and popup.isVisible():
                 popup.close()
@@ -1061,6 +1296,8 @@ class Overlay(QWidget):
             self.show_overlay()
         if self._selecting:
             self._cancel_selection_state()
+        # A pan's release is ignored once clicks pass through.
+        self._stop_panning()
         self.pass_through = not self.pass_through
 
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, self.pass_through)
@@ -1129,16 +1366,22 @@ class Overlay(QWidget):
     # -- stroke lifecycle --------------------------------------------------
 
     def _begin_stroke(self, pos, pressure, eraser=None):
+        # pos is in stroke coordinates (see _to_doc).
         if self.pass_through:
             return
-        if self.region is not None and not self.drawable_rect().contains(QPointF(pos).toPoint()):
+        if self.capture is not None:
+            if not self._doc_outer().contains(QPointF(pos)):
+                return
+        elif self.region is not None and not self.drawable_rect().contains(QPointF(pos).toPoint()):
             return
         self.raw_pos = QPointF(pos)
         self.lazy_pos = QPointF(pos)
         self.cursor_pos = QPointF(pos)
         self.pressure = pressure if pressure > 0 else C.DEFAULT_PRESSURE
         use_eraser = self.mode == "eraser" if eraser is None else (eraser or self.mode == "eraser")
-        self.current = Stroke(self.color, self.brush_size, self.opacity, use_eraser)
+        # Brush size is on-screen size; a fitted (shrunk) capture gets a
+        # proportionally larger stroke in image pixels.
+        self.current = Stroke(self.color, self.brush_size / self._view_scale(), self.opacity, use_eraser)
         self._live_layer = None
         self._live_layer_origin = None
         self._live_baked_index = 0
@@ -1160,7 +1403,8 @@ class Overlay(QWidget):
         self.cursor_pos = raw
         self.pressure = pressure if pressure > 0 else C.DEFAULT_PRESSURE
 
-        radius = 2 + self.smoothing * 44
+        view_scale = self._view_scale()
+        radius = (2 + self.smoothing * 44) / view_scale
         dx = raw.x() - self.lazy_pos.x()
         dy = raw.y() - self.lazy_pos.y()
         dist = (dx * dx + dy * dy) ** 0.5
@@ -1179,10 +1423,10 @@ class Overlay(QWidget):
 
         last_point, _ = self.current.points[-1]
         moved = ((last_point.x() - self.lazy_pos.x()) ** 2 + (last_point.y() - self.lazy_pos.y()) ** 2) ** 0.5
-        if moved >= C.MIN_POINT_SPACING:
+        if moved >= C.MIN_POINT_SPACING / view_scale:
             now = time.monotonic()
             dt = max(1e-3, now - self._last_point_time)
-            speed = moved / dt
+            speed = moved * view_scale / dt  # on-screen speed
             self._last_effective_pressure = brush.effective_pressure(self.pressure, speed)
             self.current.points.append((QPointF(self.lazy_pos), self._last_effective_pressure))
             self._last_point_time = now
@@ -1351,6 +1595,10 @@ class Overlay(QWidget):
                     self.current = None
                     self.lazy_pos = None
                     self.update()
+                if self._panning is not None:
+                    # A pen pan that ended over the toolbar: end it here, or
+                    # pen hover would keep moving the capture.
+                    self._pan_input("release", pos)
             event.ignore()
             return
 
@@ -1366,6 +1614,19 @@ class Overlay(QWidget):
             event.accept()
             return
 
+        if self._wants_pan() and self.current is None:
+            kind = {QEvent.Type.TabletPress: "press", QEvent.Type.TabletMove: "move",
+                    QEvent.Type.TabletRelease: "release"}.get(event_type)
+            if kind == "press":
+                self._tablet_contact = True
+            elif kind == "release":
+                self._tablet_contact = False
+            if kind is not None and (kind == "press" or self._panning is not None):
+                self._pan_input(kind, pos)
+            event.accept()
+            return
+
+        pos = self._to_doc(pos)
         if event_type == QEvent.Type.TabletPress:
             is_alt = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
             if self.mode == "eyedropper" or is_alt:
@@ -1403,12 +1664,16 @@ class Overlay(QWidget):
                     self._selection_input("press", pos)
                     event.accept()
                     return
+                if self._wants_pan():
+                    self._pan_input("press", pos)
+                    event.accept()
+                    return
                 is_alt = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
                 if self.mode == "eyedropper" or is_alt:
                     self._pick_color_and_restore_mode(event.globalPosition())
                     event.accept()
                     return
-                self._begin_stroke(pos, 0.65)
+                self._begin_stroke(self._to_doc(pos), 0.65)
                 event.accept()
         except Exception:
             logger.exception("Error handling mouse press")
@@ -1426,12 +1691,14 @@ class Overlay(QWidget):
             if self._selecting:
                 if event.buttons() & Qt.MouseButton.LeftButton:
                     self._selection_input("move", pos)
+            elif self._panning is not None:
+                self._pan_input("move", pos)
             elif event.buttons() & Qt.MouseButton.LeftButton and not self._point_over_ui(pos):
-                self._add_point(pos, 0.65)
+                self._add_point(self._to_doc(pos), 0.65)
             else:
                 prev_cursor = self.cursor_pos
-                self.cursor_pos = pos
-                self._mark_dirty(prev_cursor, pos)
+                self.cursor_pos = self._to_doc(pos)
+                self._mark_dirty(prev_cursor, self.cursor_pos)
         except Exception:
             logger.exception("Error handling mouse move")
             event.accept()
@@ -1447,6 +1714,8 @@ class Overlay(QWidget):
             if event.button() == Qt.MouseButton.LeftButton:
                 if self._selecting:
                     self._selection_input("release", self._overlay_pos(event))
+                elif self._panning is not None:
+                    self._pan_input("release", self._overlay_pos(event))
                 else:
                     self._end_stroke()
                 event.accept()
@@ -1462,7 +1731,8 @@ class Overlay(QWidget):
         return self.brush_size * 1.6 + 12
 
     def _mark_dirty(self, *points):
-        pts = [p for p in points if p is not None]
+        # Points are in stroke coordinates; repaint where they show.
+        pts = [self._to_view(p) for p in points if p is not None]
         if not pts:
             return
         margin = self._dirty_margin()
@@ -1520,12 +1790,7 @@ class Overlay(QWidget):
         # margin band gets its own color and opacity; both stay layers under
         # the canvas, so the eraser works the same on them.
         floor = QColor(0, 0, 0, 1)
-        if self.pass_through or self.backdrop is None:
-            fill = None
-        elif self.backdrop == "white":
-            fill = QColor(255, 255, 255, int(self.backdrop_opacity * 255))
-        else:
-            fill = QColor(0, 0, 0, int(self.backdrop_opacity * 255))
+        fill = self._backdrop_fill()
         painter.save()
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
         if self.region is None:
@@ -1547,9 +1812,60 @@ class Overlay(QWidget):
                 painter.fillPath(path, band)
         painter.restore()
 
+    def _backdrop_fill(self, ignore_pass_through=False):
+        if self.backdrop is None or (self.pass_through and not ignore_pass_through):
+            return None
+        if self.backdrop == "white":
+            return QColor(255, 255, 255, int(self.backdrop_opacity * 255))
+        return QColor(0, 0, 0, int(self.backdrop_opacity * 255))
+
+    def _paint_capture_layers(self, painter):
+        """Everything under the strokes during a capture, each its own
+        layer: dimmed surround, margin, image, backdrop wash.
+
+        The margin and image are painted into whole device-pixel rects from
+        one edge-rounding rule (capture.view_device_rects), with
+        antialiasing off. They share their edges exactly, so no pixel along
+        an edge or corner is part-image, part-margin or empty, at any fit
+        scale or monitor scale."""
+        cap = self.capture
+        wdpr = self._window_dpr()
+        outer_dev, image_dev = cap.view_device_rects(self._margin_px(), wdpr)
+        painter.save()
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        if self.pass_through:
+            # Clicks go to the apps underneath, so show them: no surround,
+            # image or margin, only the strokes (as with a drawing region).
+            painter.fillRect(self.rect(), QColor(0, 0, 0, 1))
+            painter.restore()
+            return
+        painter.fillRect(self.rect(), capture_mod.SURROUND)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        painter.scale(1.0 / wdpr, 1.0 / wdpr)  # device pixels from here
+        resampled = image_dev.size() != cap.image.size()
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, resampled)
+        if self.margin_enabled:
+            painter.fillRect(QRectF(outer_dev), region_mod.margin_color(self.margin_color, self.margin_opacity))
+        painter.drawPixmap(QRectF(image_dev), cap.image, QRectF(cap.image.rect()))
+        fill = self._backdrop_fill()
+        if fill is not None:
+            painter.fillRect(QRectF(image_dev), fill)
+        painter.restore()
+
+    def _window_dpr(self):
+        return max(1.0, float(self.devicePixelRatioF()))
+
+    def _capture_clip(self):
+        """Window-coordinate clip for strokes: the margin's device rect."""
+        outer_dev, _ = self.capture.view_device_rects(self._margin_px(), self._window_dpr())
+        d = self._window_dpr()
+        return QRectF(outer_dev.x() / d, outer_dev.y() / d, outer_dev.width() / d, outer_dev.height() / d)
+
     def _commit_stroke_to_canvas(self, stroke):
         painter = QPainter(self._canvas)
         try:
+            painter.translate(-self._canvas_origin)
             self._draw_stroke(painter, stroke)
         finally:
             painter.end()
@@ -1563,16 +1879,27 @@ class Overlay(QWidget):
         # Holds strokes only, at the monitor's pixel density (see
         # _target_dpr), transparent so the eraser's CompositionMode_Clear
         # works.
+        #
+        # During a capture it covers the image plus margin in document
+        # coordinates, at the image's pixel density (the export resolution).
         dpr = self._target_dpr()
-        canvas = brush.new_layer(self.size(), dpr)
+        if getattr(self, "capture", None) is not None:
+            outer = self._doc_outer()
+            size = capture_mod.canvas_size(outer)
+            self._canvas_origin = outer.topLeft()
+        else:
+            size = self.size()
+            self._canvas_origin = QPointF(0, 0)
+        canvas = brush.new_layer(size, dpr)
         if canvas.isNull() and dpr > 1.0:
-            logger.warning("Couldn't allocate a %gx canvas for %s; falling back to 1x", dpr, self.size())
-            canvas = brush.new_layer(self.size(), 1.0)
+            logger.warning("Couldn't allocate a %gx canvas for %s; falling back to 1x", dpr, size)
+            canvas = brush.new_layer(size, 1.0)
         if canvas.isNull():
-            logger.error("Couldn't allocate the drawing canvas (%s). Try --screens primary.", self.size())
+            logger.error("Couldn't allocate the drawing canvas (%s). Try --screens primary.", size)
         self._canvas = canvas
         painter = QPainter(self._canvas)
         try:
+            painter.translate(-self._canvas_origin)
             for stroke in self.history:
                 self._draw_stroke(painter, stroke)
         finally:
@@ -1581,8 +1908,12 @@ class Overlay(QWidget):
     def _target_dpr(self):
         """Pixel density for the canvas: the monitor's scale factor, unless
         that would make the canvas unreasonably large."""
-        dpr = max(1.0, float(self.devicePixelRatioF()))
-        size = self.size()
+        if getattr(self, "capture", None) is not None:
+            dpr = max(1.0, self.capture.dpr)
+            size = capture_mod.canvas_size(self._doc_outer())
+        else:
+            dpr = max(1.0, float(self.devicePixelRatioF()))
+            size = self.size()
         if size.width() * size.height() * dpr * dpr > _MAX_CANVAS_DEVICE_PIXELS:
             return 1.0
         return dpr
@@ -1597,10 +1928,26 @@ class Overlay(QWidget):
         painter = QPainter(self)
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            self._paint_backdrop(painter)
-            if self.region is not None:
+            if self._grabbing:
+                # Nothing of ours in the screen grab for a new capture; the
+                # 1/255 floor keeps the window hit-testable.
+                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+                painter.fillRect(self.rect(), QColor(0, 0, 0, 1))
+                return
+            clipped = self.capture is not None or self.region is not None
+            if self.capture is not None:
+                self._paint_capture_layers(painter)
                 painter.save()
-                painter.setClipRect(self.drawable_rect())
+                # Clip in window space to the margin's own device rect, then
+                # switch to document coordinates for the strokes.
+                painter.setClipRect(self._capture_clip())
+                painter.setTransform(self.capture.transform(), combine=True)
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, self.capture.scale != 1.0)
+            else:
+                self._paint_backdrop(painter)
+                if self.region is not None:
+                    painter.save()
+                    painter.setClipRect(self.drawable_rect())
 
             live_eraser = (
                 self.current is not None and self.current.eraser and self._live_layer is not None
@@ -1612,21 +1959,25 @@ class Overlay(QWidget):
                 # since by then both are pixels on the same surface.
                 # Composite canvas plus live mask in an isolated buffer
                 # scoped to the dirty rect, then draw that over the
-                # backdrop.
+                # backdrop. Stroke coordinates throughout (the painter
+                # carries any capture transform).
                 dirty = event.rect()
+                if self.capture is not None:
+                    inverse, _ok = self.capture.transform().inverted()
+                    dirty = inverse.mapRect(QRectF(dirty)).toAlignedRect().adjusted(-1, -1, 1, 1)
                 temp = brush.new_layer(dirty.size(), self._canvas_dpr())
                 tp = QPainter(temp)
                 try:
                     tp.setRenderHint(QPainter.RenderHint.Antialiasing, True)
                     tp.translate(-dirty.topLeft())
-                    tp.drawPixmap(0, 0, self._canvas)
+                    tp.drawPixmap(self._canvas_origin, self._canvas)
                     tp.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationOut)
                     tp.drawPixmap(self._live_layer_origin, self._live_layer)
                 finally:
                     tp.end()
                 painter.drawPixmap(dirty.topLeft(), temp)
             else:
-                painter.drawPixmap(0, 0, self._canvas)
+                painter.drawPixmap(self._canvas_origin, self._canvas)
                 if self.current and self._live_layer is not None:
                     # Brush preview: SourceOver only adds color on top, so
                     # it can't reach through to the backdrop the way the
@@ -1636,18 +1987,22 @@ class Overlay(QWidget):
                     painter.drawPixmap(self._live_layer_origin, self._live_layer)
                     painter.restore()
 
-            if self.region is not None:
+            if clipped:
                 painter.restore()
-                if not self._capturing and not self.pass_through:
-                    self._paint_region_frame(painter, self.region)
-            if self._selecting and self._selection_anchor is not None:
+            if self.region is not None and not self._capturing and not self.pass_through:
+                self._paint_region_frame(painter, self.region)
+            if self._selecting and self._selection_anchor is not None and not self._capturing:
                 rect = region_mod.selection_rect(self._selection_anchor, self._selection_point, self.rect())
                 self._paint_region_frame(painter, rect, selecting=True)
 
             # Not while capturing: a real mouse move during the capture delay
             # sets cursor_pos again and would put the ring in the screenshot.
-            if not self.pass_through and self.cursor_pos and not self._selecting and not self._capturing:
+            if (not self.pass_through and self.cursor_pos and not self._selecting and not self._capturing
+                    and not self._wants_pan()):
                 painter.save()
+                # Ring and guide in window coordinates, at on-screen size.
+                cursor_view = self._to_view(self.cursor_pos)
+                lazy_view = self._to_view(self.lazy_pos) if self.lazy_pos else None
                 d = brush.width_for(self.brush_size, self._last_effective_pressure)
                 if self.mode == "eraser":
                     ring_color = QColor(255, 255, 255, 210)
@@ -1656,10 +2011,10 @@ class Overlay(QWidget):
                     ring_color.setAlpha(220)
                 painter.setPen(QPen(ring_color, 1.4))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawEllipse(self.cursor_pos, d / 2, d / 2)
-                if self.lazy_pos and self.smoothing > 0.02:
+                painter.drawEllipse(cursor_view, d / 2, d / 2)
+                if lazy_view is not None and self.smoothing > 0.02:
                     painter.setPen(QPen(QColor(255, 255, 255, 95), 1))
-                    painter.drawLine(self.lazy_pos, self.cursor_pos)
+                    painter.drawLine(lazy_view, cursor_view)
                 painter.restore()
         finally:
             painter.end()
@@ -1691,23 +2046,54 @@ class Overlay(QWidget):
         return QGuiApplication.screenAt(cursor_pos) or QGuiApplication.primaryScreen()
 
     def capture_annotated(self):
+        """F9. A saved screenshot opens in the default image viewer and the
+        overlay hides to the tray with everything kept; the hotkey brings
+        the session back. A failed one leaves the overlay up and says so."""
+        if self._capturing or self._grabbing:
+            return
+        if self.capture is not None:
+            # Rendered from the layers at the image's resolution, not
+            # grabbed from the screen: no desktop, no fit scaling, and no
+            # toolbar or other chrome (they're never part of the layers).
+            out = None
+            try:
+                out = self._save_and_report(self.capture_export())
+            except Exception:
+                logger.exception("Error exporting capture")
+                self.status_changed.emit("Screenshot failed, see log")
+            if out is not None:
+                self._after_screenshot_saved(out)
+            return
         try:
+            # Everything of ours that isn't the drawing: toolbar, toast, hover
+            # tip, popups, and the pass-through badge (its own window).
             # The toolbar's own hidden flag, not isVisible(): from the tray
             # while the overlay is hidden, isVisible() is False and the
-            # toolbar would never come back (#25).
-            panel_vis = not self.panel.isHidden()
-            toast_vis = self.toast_label.isVisible()
+            # toolbar would never come back.
+            chrome = {
+                "panel": not self.panel.isHidden(),
+                "toast": self.toast_label.isVisible(),
+                "badge": self._pass_through_badge.isVisible(),
+            }
             cursor_pos = QCursor.pos()
             self.panel.hide()
             self.toast_label.hide()
+            self._hover_tip_timer.stop()
+            self.hover_tip.hide()
+            self._pass_through_badge.hide()
+            for popup in (self._region_popup, self._color_popup):
+                if popup is not None and popup.isVisible():
+                    popup.close()
             saved_cursor = self.cursor_pos
             self.cursor_pos = None
             self._capturing = True
             self.update()
             QApplication.processEvents()
-            QTimer.singleShot(100, lambda: self._finish_capture(panel_vis, toast_vis, saved_cursor, cursor_pos))
+            QTimer.singleShot(100, lambda: self._finish_capture(chrome, saved_cursor, cursor_pos))
         except Exception:
             logger.exception("Failed to start screenshot capture")
+            self._capturing = False
+            self.status_changed.emit("Screenshot failed, see log")
 
     def capture_region_pixmap(self):
         """Screenshot of the drawing region plus margin, from the covered
@@ -1721,7 +2107,8 @@ class Overlay(QWidget):
         margin = region_mod.margin_color(self.margin_color) if self.margin_enabled else None
         return region_mod.compose_capture(grab, self._canvas, self.region, self.drawable_rect(), margin)
 
-    def _finish_capture(self, panel_vis, toast_vis, saved_cursor, cursor_pos):
+    def _finish_capture(self, chrome, saved_cursor, cursor_pos):
+        out = None
         try:
             if self.region is not None:
                 screen = self._target_screen or QGuiApplication.primaryScreen()
@@ -1733,28 +2120,74 @@ class Overlay(QWidget):
                 logger.error("Screen grab returned nothing for %s", screen.name())
                 self.status_changed.emit("Screenshot failed, see log")
                 return
-            out = self._save_screenshot(pixmap, f"crit_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
-            if out is not None:
-                logger.info("Saved screenshot to %s", out)
-                preferred = paths.current().screenshot_dir_candidates(self._screenshot_dir_override)[0]
-                if out.parent == preferred:
-                    self.status_changed.emit(f"Saved {out.name}")
-                else:
-                    self.status_changed.emit(f"Saved to {out.parent}")
-                self._reveal_in_explorer(out)
-            else:
-                self.status_changed.emit("Screenshot failed, see log")
+            out = self._save_and_report(pixmap)
         except Exception:
             logger.exception("Error finishing screenshot capture")
             self.status_changed.emit("Screenshot failed, see log")
         finally:
+            # Put the chrome back first, so a restored session has it.
             self._capturing = False
             self.cursor_pos = saved_cursor
-            if panel_vis and not self.pass_through:
+            if chrome["panel"] and not self.pass_through:
                 self.panel.show()
-            if toast_vis:
+            if chrome["toast"] and out is None:
                 self.toast_label.show()
+            if chrome["badge"] and self.pass_through:
+                self._position_pass_through_badge()
+                self._pass_through_badge.show()
             self.update()
+            if out is not None:
+                self._after_screenshot_saved(out)
+
+    def _save_and_report(self, pixmap):
+        """Save; returns the path, or None after reporting the failure."""
+        if pixmap is None or pixmap.isNull():
+            self.status_changed.emit("Screenshot failed, see log")
+            return None
+        out = self._save_screenshot(pixmap, f"crit_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+        if out is not None:
+            logger.info("Saved screenshot to %s", out)
+            preferred = paths.current().screenshot_dir_candidates(self._screenshot_dir_override)[0]
+            if out.parent == preferred:
+                self.status_changed.emit(f"Saved {out.name}")
+            else:
+                self.status_changed.emit(f"Saved to {out.parent}")
+        else:
+            self.status_changed.emit("Screenshot failed, see log")
+        return out
+
+    # How long after opening the viewer to open Explorer, so Explorer's
+    # window arrives last and ends up in front for drag-and-drop. Covers a
+    # typical viewer start; a slower cold start can still land on top.
+    EXPLORER_AFTER_VIEWER_MS = 1200
+
+    def _after_screenshot_saved(self, out):
+        """Hide to the tray (keeping the canvas, strokes, margin and undo
+        history), open the image in the default viewer, then Explorer with
+        it selected, in front. The next show resumes this session instead
+        of starting a new selection. Without a tray the overlay stays up:
+        there'd be no way back to it."""
+        if self._tray_available:
+            was_visible = self.isVisible()
+            self._resume_on_show = True
+            self.hide_to_tray()
+            if was_visible:
+                self.hidden_to_tray.emit()
+        if self._open_in_viewer(out):
+            QTimer.singleShot(self.EXPLORER_AFTER_VIEWER_MS, lambda: self._reveal_in_explorer(out))
+        else:
+            self._reveal_in_explorer(out)
+
+    def _open_in_viewer(self, path):
+        """The default app for .png, through the shell (os.startfile), the
+        same way app.py opens diagnostics reports. True if it launched."""
+        native_windows.allow_foreground_handoff()
+        try:
+            os.startfile(str(path))  # noqa: S606 - user-initiated, our own screenshot
+            return True
+        except Exception:
+            logger.warning("Couldn't open %s in the default viewer", path, exc_info=True)
+            return False
 
     def _save_screenshot(self, pixmap, name):
         """Try each candidate folder in turn (Pictures first). On managed
@@ -1785,6 +2218,10 @@ class Overlay(QWidget):
         return None
 
     def _reveal_in_explorer(self, path):
+        # Still allowed to hand over the foreground: F9 was the last input
+        # this session received, unless the user has clicked elsewhere
+        # since, in which case Explorer opens behind and flashes.
+        native_windows.allow_foreground_handoff()
         explorer = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "explorer.exe")
         try:
             subprocess.Popen([explorer, f"/select,{path}"])
