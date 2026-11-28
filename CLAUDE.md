@@ -103,4 +103,4 @@ On 2026-11-27 the owner reopened the freeze for one feature, the centered captur
 ## Current state
 
 - **Repository settings:** `main` is protected: PR required (0 approvals), `lint`, the four `test` jobs and both `build` jobs required (`reproducibility` is informational), conversations resolved, no force-push or deletion. Merged branches are deleted automatically. Private vulnerability reporting is on (`SECURITY.md`). Renaming a CI job means updating the required checks.
-- **Releases:** v1.4.2 is the stable release. v1.5.0-rc.4 is the current pre-release and the frozen acceptance baseline, pending #4. It supersedes rc.3 (tray, hotkey, single instance, #14), rc.2 (annotation margin fix, #13) and rc.1 (built locally before CI existed).
+- **Releases:** v1.4.2 is the stable release. v1.5.0-rc.5 is the current pre-release, pending #4. It supersedes rc.4 (tray, hotkey, single instance, #14), rc.3, rc.2 (annotation margin fix, #13) and rc.1 (built locally before CI existed).
